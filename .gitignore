@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+progress_*.json
+cookies.json
+debug/
+*.xlsx
+screenshot.png

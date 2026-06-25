@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>考试宝题库爬取工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; }
+        .container { max-width: 960px; margin: 0 auto; padding: 20px; }
+        .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
+        h1 { font-size: 24px; color: #1a1a1a; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
+        .input-group { display: flex; gap: 12px; margin-bottom: 12px; }
+        .input-group input { flex: 1; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; outline: none; transition: border-color 0.2s; }
+        .input-group input:focus { border-color: #4a90d9; }
+        .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+        .btn-primary { background: #4a90d9; color: #fff; }
+        .btn-primary:hover { background: #3a7bc8; }
+        .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+        .btn-success { background: #52c41a; color: #fff; }
+        .btn-success:hover { background: #73d13d; }
+        .btn-danger { background: #ff4d4f; color: #fff; font-size: 12px; padding: 4px 10px; }
+        .btn-danger:hover { background: #ff7875; }
+        .btn-ghost { background: transparent; color: #999; font-size: 12px; padding: 4px 10px; }
+        .btn-ghost:hover { color: #333; }
+        .btn-sm { padding: 6px 12px; font-size: 13px; }
+        .btn-download { background: #52c41a; color: #fff; font-size: 12px; padding: 4px 10px; text-decoration: none; display: inline-block; }
+        .btn-download:hover { background: #73d13d; }
+        .chrome-status { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #f9f9f9; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+        .chrome-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .chrome-dot.online { background: #52c41a; box-shadow: 0 0 6px rgba(82,196,26,0.5); }
+        .chrome-dot.offline { background: #ff4d4f; }
+        .quick-ids { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+        .quick-id { padding: 6px 12px; background: #e6f7ff; border: 1px solid #91d5ff; border-radius: 4px; cursor: pointer; font-size: 13px; color: #1890ff; }
+        .quick-id:hover { background: #bae7ff; }
+        .tip { background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; padding: 10px 14px; font-size: 13px; color: #ad6800; margin-bottom: 16px; }
+        .tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid #e8e8e8; }
+        .tab { padding: 8px 16px; cursor: pointer; font-size: 14px; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; user-select: none; }
+        .tab.active { color: #4a90d9; border-bottom-color: #4a90d9; }
+        .tab:hover { color: #4a90d9; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        textarea { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; resize: vertical; min-height: 80px; outline: none; font-family: inherit; }
+        textarea:focus { border-color: #4a90d9; }
+
+        .task-list { display: flex; flex-direction: column; gap: 16px; }
+        .task-card { border: 1px solid #e8e8e8; border-radius: 10px; padding: 16px; background: #fafafa; position: relative; }
+        .task-card.running { border-color: #4a90d9; background: #f0f7ff; }
+        .task-card.done { border-color: #52c41a; background: #f6ffed; }
+        .task-card.error { border-color: #ff4d4f; background: #fff2f0; }
+        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .task-title { font-size: 16px; font-weight: 600; color: #333; }
+        .task-actions { display: flex; gap: 8px; }
+        .phase-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: #fff; margin-left: 8px; }
+        .phase-collect { background: #4a90d9; }
+        .phase-done { background: #52c41a; }
+        .phase-error { background: #ff4d4f; }
+        .task-progress { margin-bottom: 10px; }
+        .progress-bar { height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #4a90d9, #52c41a); border-radius: 3px; transition: width 0.3s; }
+        .task-stats { display: flex; gap: 16px; font-size: 13px; color: #666; flex-wrap: wrap; }
+        .task-stats span { color: #333; font-weight: 600; }
+        .task-message { font-size: 13px; color: #888; margin-top: 6px; }
+        .task-log { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 12px; max-height: 150px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; line-height: 1.5; margin-top: 10px; display: none; }
+        .task-log.show { display: block; }
+        .task-log .success { color: #4ec9b0; }
+        .task-log .error { color: #f44747; }
+        .task-log .info { color: #569cd6; }
+        .toggle-log { font-size: 12px; color: #4a90d9; cursor: pointer; margin-top: 6px; display: inline-block; }
+        .toggle-log:hover { text-decoration: underline; }
+        .no-task { text-align: center; padding: 40px; color: #bbb; font-size: 15px; }
+
+        .files-section h2 { font-size: 16px; margin-bottom: 12px; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: #f9f9f9; border-radius: 6px; margin-bottom: 8px; }
+        .file-name { font-size: 14px; color: #333; word-break: break-all; }
+        .file-meta { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+        .file-size { font-size: 12px; color: #999; }
+        .file-del { color: #ff4d4f; cursor: pointer; font-size: 12px; opacity: 0.6; }
+        .file-del:hover { opacity: 1; }
+
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 9999; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 400px; }
+        .toast.show { opacity: 1; }
+        .toast.success { background: #52c41a; }
+        .toast.error { background: #ff4d4f; }
+        .toast.info { background: #4a90d9; }
+    </style>
+</head>
+<body>
+    <div id="toast" class="toast"></div>
+
+    <div class="container">
+        <div class="card">
+            <h1>考试宝题库爬取工具</h1>
+            <p class="subtitle">通过Chrome已登录会话爬取，支持5个任务并行，背题模式一次收集题目+答案</p>
+
+            <div class="chrome-status" id="chromeStatus">
+                <div class="chrome-dot offline" id="chromeDot"></div>
+                <span id="chromeText">检查Chrome状态...</span>
+                <button class="btn btn-sm btn-success" onclick="startChrome()" style="margin-left:auto;" id="chromeBtn">启动Chrome</button>
+            </div>
+
+            <div class="tip" id="tipArea">
+                点击"启动Chrome"会以调试模式重启Chrome（登录态自动保留），并自动打开考试宝网站。
+            </div>
+
+            <div style="margin-bottom:12px;padding:10px;background:#f0f7ff;border:1px solid #91d5ff;border-radius:6px;font-size:13px;">
+                <label style="font-weight:600;">读取模式：</label>
+                <select id="readMode" style="padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;">
+                    <option value="hybrid">混合模式（DOM结构+OCR题目，推荐）</option>
+                    <option value="ocr">OCR模式（全截图识别，文字最准，最慢）</option>
+                    <option value="dom">DOM模式（直接读取，最快，文字有乱码）</option>
+                    <option value="race">竞速模式（三种模式同时跑，对比效果）</option>
+                </select>
+                <span style="color:#999;margin-left:8px;">切换后需重新启动任务</span>
+            </div>
+
+            <div class="quick-ids">
+                <span style="font-size:13px;color:#999;line-height:28px;">常用题库:</span>
+                <div class="quick-id" onclick="setId('17940685')">17940685</div>
+                <div class="quick-id" onclick="setId('13573440')">13573440</div>
+            </div>
+
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('single')">单个任务</div>
+                <div class="tab" onclick="switchTab('batch')">批量导入</div>
+            </div>
+
+            <div id="tab-single" class="tab-content active">
+                <div class="input-group">
+                    <input type="text" id="paperId" placeholder="输入题库ID（从URL获取，如 13573440）" onkeydown="if(event.key==='Enter')startTask()" />
+                    <button class="btn btn-primary" id="startBtn" onclick="startTask()">添加任务</button>
+                </div>
+                <div style="margin-top:12px;padding:12px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:8px;">
+                    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                        <label style="font-size:13px;color:#333;">
+                            <input type="checkbox" id="parallelMode" style="margin-right:4px;">分段并行
+                        </label>
+                        <label style="font-size:13px;color:#666;">
+                            总题数 <input type="number" id="totalQ" value="702" style="width:60px;padding:2px 6px;border:1px solid #d9d9d9;border-radius:4px;">
+                        </label>
+                        <label style="font-size:13px;color:#666;">
+                            并行数
+                            <select id="workerCount" style="padding:2px 6px;border:1px solid #d9d9d9;border-radius:4px;">
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4" selected>4</option>
+                                <option value="5">5</option>
+                            </select>
+                        </label>
+                        <button class="btn btn-success btn-sm" id="parallelBtn" onclick="startParallel()">分段爬取</button>
+                        <button class="btn btn-primary btn-sm" id="mergeBtn" onclick="mergeSegments()" style="display:none;">合并结果</button>
+                    </div>
+                    <div style="font-size:12px;color:#999;margin-top:6px;">分段并行会把题库拆成多份同时爬取，速度提升2-5倍</div>
+                </div>
+            </div>
+
+            <div id="tab-batch" class="tab-content">
+                <textarea id="batchIds" placeholder="每行一个题库ID或URL，例如：&#10;13573440&#10;17940685&#10;https://www.kaoshibao.com/ti/12345/"></textarea>
+                <div style="margin-top:8px;text-align:right;">
+                    <button class="btn btn-primary" id="batchBtn" onclick="batchStart()">批量添加</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 style="font-size:16px;margin-bottom:16px;">任务列表 <span id="taskCount" style="color:#999;font-weight:normal;font-size:13px;"></span></h2>
+            <div class="task-list" id="taskList">
+                <div class="no-task">暂无任务，输入题库ID开始爬取</div>
+            </div>
+        </div>
+
+        <div class="card files-section">
+            <h2>已生成文件</h2>
+            <div id="fileList">加载中...</div>
+        </div>
+    </div>
+
+    <script>
+        var polling = null;
+
+        function esc(str) {
+            if (!str) return '';
+            var div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function showToast(msg, type) {
+            type = type || 'info';
+            var el = document.getElementById('toast');
+            el.textContent = msg;
+            el.className = 'toast ' + type + ' show';
+            clearTimeout(el._timer);
+            el._timer = setTimeout(function() { el.className = 'toast'; }, 3000);
+        }
+
+        function setId(id) {
+            document.getElementById('paperId').value = id;
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+            document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+            if (tab === 'single') {
+                document.querySelectorAll('.tab')[0].classList.add('active');
+                document.getElementById('tab-single').classList.add('active');
+            } else {
+                document.querySelectorAll('.tab')[1].classList.add('active');
+                document.getElementById('tab-batch').classList.add('active');
+            }
+        }
+
+        function formatElapsed(seconds) {
+            if (!seconds || seconds <= 0) return '';
+            var m = Math.floor(seconds / 60);
+            var s = seconds % 60;
+            if (m > 0) return m + '分' + s + '秒';
+            return s + '秒';
+        }
+
+        async function checkChrome() {
+            try {
+                var res = await fetch('/api/chrome-status');
+                var data = await res.json();
+                var dot = document.getElementById('chromeDot');
+                var text = document.getElementById('chromeText');
+                var btn = document.getElementById('chromeBtn');
+                var tip = document.getElementById('tipArea');
+                if (data.online) {
+                    dot.className = 'chrome-dot online';
+                    text.textContent = 'Chrome已连接（调试模式）';
+                    btn.textContent = '已连接';
+                    btn.disabled = true;
+                    tip.textContent = 'Chrome已就绪，可以直接输入题库ID开始爬取。';
+                } else {
+                    dot.className = 'chrome-dot offline';
+                    text.textContent = 'Chrome未就绪 - 需要以调试模式启动';
+                    btn.textContent = '启动Chrome';
+                    btn.disabled = false;
+                    tip.textContent = '点击"启动Chrome"会以调试模式重启Chrome（登录态自动保留），并自动打开考试宝网站。';
+                }
+            } catch (e) {
+                document.getElementById('chromeText').textContent = '服务未连接';
+            }
+        }
+
+        async function startChrome() {
+            var btn = document.getElementById('chromeBtn');
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            try {
+                var res = await fetch('/api/chrome-start', { method: 'POST' });
+                var data = await res.json();
+                if (data.ok) {
+                    if (data.logged_in === true) {
+                        showToast('Chrome已就绪，考试宝已登录', 'success');
+                    } else if (data.logged_in === false) {
+                        showToast('Chrome已就绪，但考试宝需要重新登录', 'info');
+                    } else {
+                        showToast('Chrome已启动', 'success');
+                    }
+                } else {
+                    showToast(data.message || '启动失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '启动Chrome';
+                }
+                checkChrome();
+            } catch (e) {
+                showToast('启动失败: 服务未连接', 'error');
+                btn.disabled = false;
+                btn.textContent = '启动Chrome';
+            }
+        }
+
+        async function startTask() {
+            var paperId = document.getElementById('paperId').value.trim();
+            if (!paperId) { showToast('请输入题库ID', 'error'); return; }
+            var mode = document.getElementById('readMode').value;
+            var btn = document.getElementById('startBtn');
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            try {
+                var res = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paper_id: paperId, mode: mode })
+                });
+                var data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                document.getElementById('paperId').value = '';
+                if (data.mode === 'race') {
+                    showToast('竞速模式已启动！OCR vs DOM 同时开跑', 'success');
+                } else {
+                    showToast('任务已启动', 'success');
+                }
+                startPolling();
+            } catch (e) {
+                showToast('启动失败: 服务未连接', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '添加任务';
+            }
+        }
+
+        async function batchStart() {
+            var raw = document.getElementById('batchIds').value.trim();
+            if (!raw) { showToast('请输入题库ID', 'error'); return; }
+            var ids = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+            if (ids.length === 0) { showToast('请输入题库ID', 'error'); return; }
+            if (ids.length > 10) { showToast('单次最多10个', 'error'); return; }
+
+            var btn = document.getElementById('batchBtn');
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            try {
+                var res = await fetch('/api/batch-start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids: ids })
+                });
+                var data = await res.json();
+                if (data.results) {
+                    var okCount = data.results.filter(function(r) { return r.ok; }).length;
+                    var failCount = data.results.length - okCount;
+                    if (okCount > 0) showToast(okCount + '个任务已启动' + (failCount > 0 ? '，' + failCount + '个失败' : ''), 'success');
+                    else showToast('全部失败', 'error');
+                    document.getElementById('batchIds').value = '';
+                    startPolling();
+                } else if (data.error) {
+                    showToast(data.error, 'error');
+                }
+            } catch (e) {
+                showToast('批量启动失败: 服务未连接', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '批量添加';
+            }
+        }
+
+        var parallelPaperId = '';
+        var parallelWorkers = 0;
+
+        async function startParallel() {
+            var paperId = document.getElementById('paperId').value.trim();
+            if (!paperId) { showToast('请输入题库ID', 'error'); return; }
+            var totalQ = parseInt(document.getElementById('totalQ').value) || 702;
+            var workers = parseInt(document.getElementById('workerCount').value) || 4;
+            var btn = document.getElementById('parallelBtn');
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            try {
+                var res = await fetch('/api/start-parallel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paper_id: paperId, total_questions: totalQ, workers: workers })
+                });
+                var data = await res.json();
+                if (data.ok) {
+                    parallelPaperId = data.paper_id;
+                    parallelWorkers = data.workers;
+                    showToast(workers + '个分段任务已启动', 'success');
+                    document.getElementById('paperId').value = '';
+                    document.getElementById('mergeBtn').style.display = 'inline-block';
+                    startPolling();
+                } else {
+                    showToast(data.error || '启动失败', 'error');
+                }
+            } catch (e) {
+                showToast('启动失败: 服务未连接', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '分段爬取';
+            }
+        }
+
+        async function mergeSegments() {
+            if (!parallelPaperId) { showToast('没有待合并的分段', 'error'); return; }
+            var btn = document.getElementById('mergeBtn');
+            btn.disabled = true;
+            btn.textContent = '合并中...';
+            try {
+                var res = await fetch('/api/merge-segments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paper_id: parallelPaperId, workers: parallelWorkers })
+                });
+                var data = await res.json();
+                if (data.ok) {
+                    showToast('合并完成! ' + data.total + '题, ' + data.has_answer + '道有答案', 'success');
+                    parallelPaperId = '';
+                    parallelWorkers = 0;
+                    btn.style.display = 'none';
+                    loadFiles();
+                } else {
+                    showToast(data.error || '合并失败', 'error');
+                }
+            } catch (e) {
+                showToast('合并失败: 服务未连接', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '合并结果';
+            }
+        }
+
+        async function stopTask(taskId) {
+            try { await fetch('/api/stop/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
+        }
+
+        async function removeTask(taskId) {
+            try { await fetch('/api/remove/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
+        }
+
+        function toggleLog(taskId) {
+            var el = document.getElementById('log-' + taskId);
+            if (el) el.classList.toggle('show');
+        }
+
+        function startPolling() {
+            if (polling) return;
+            polling = setInterval(async function() {
+                try {
+                    var res = await fetch('/api/tasks');
+                    var taskList = await res.json();
+                    renderTasks(taskList);
+                    var anyRunning = taskList.some(function(t) { return t.running; });
+                    if (!anyRunning) {
+                        clearInterval(polling);
+                        polling = null;
+                        loadFiles();
+                    }
+                    checkChrome();
+                } catch (e) {}
+            }, 1500);
+        }
+
+        function renderTasks(taskList) {
+            var container = document.getElementById('taskList');
+            var countEl = document.getElementById('taskCount');
+            var running = taskList.filter(function(t) { return t.running; }).length;
+            countEl.textContent = taskList.length > 0 ? '(' + running + ' 运行中 / ' + taskList.length + ' 总计)' : '';
+
+            if (taskList.length === 0) {
+                container.innerHTML = '<div class="no-task">暂无任务，输入题库ID开始爬取</div>';
+                return;
+            }
+
+            container.innerHTML = taskList.map(function(t) {
+                var cls = t.running ? 'running' : (t.phase === 'done' ? 'done' : (t.phase === 'error' ? 'error' : ''));
+                var phaseMap = {
+                    'collect': ['收集中', 'phase-collect'],
+                    'done': ['完成', 'phase-done'],
+                    'error': ['错误', 'phase-error'],
+                };
+                var phaseInfo = phaseMap[t.phase] || ['准备中', ''];
+                var phaseText = phaseInfo[0];
+                var phaseCls = phaseInfo[1];
+
+                var pct = t.total > 0 ? Math.round((t.progress / t.total) * 100) : (t.phase === 'done' ? 100 : 0);
+                var elapsed = t.elapsed ? formatElapsed(t.elapsed) : '';
+
+                var logs = (t.log || []).map(function(line) {
+                    var logCls = '';
+                    if (line.indexOf('成功') >= 0 || line.indexOf('完成') >= 0 || line.indexOf('就绪') >= 0 || line.indexOf('已连接') >= 0) logCls = 'success';
+                    else if (line.indexOf('错误') >= 0 || line.indexOf('超时') >= 0 || line.indexOf('失败') >= 0) logCls = 'error';
+                    else if (line.indexOf('开始') >= 0 || line.indexOf('开启') >= 0 || line.indexOf('连接') >= 0) logCls = 'info';
+                    return '<div class="' + logCls + '">' + esc(line) + '</div>';
+                }).join('');
+
+                var actions = '';
+                if (t.running) {
+                    actions = '<button class="btn btn-danger" onclick="stopTask(\'' + esc(t.task_id) + '\')">停止</button>';
+                } else {
+                    actions = '<button class="btn btn-ghost" onclick="removeTask(\'' + esc(t.task_id) + '\')">移除</button>';
+                }
+
+                return '<div class="task-card ' + cls + '">' +
+                    '<div class="task-header">' +
+                        '<div>' +
+                            '<span class="task-title">题库 ' + esc(t.paper_id) + (t.segment_id >= 0 ? ' <span style="color:#52c41a;font-size:12px;">分段' + (t.segment_id+1) + '</span>' : '') + (t.mode && t.mode !== 'ocr' ? ' <span style="color:#1890ff;font-size:12px;">[' + esc(t.mode.toUpperCase()) + ']</span>' : '') + '</span>' +
+                            '<span class="phase-tag ' + phaseCls + '">' + esc(phaseText) + '</span>' +
+                        '</div>' +
+                        '<div class="task-actions">' + actions + '</div>' +
+                    '</div>' +
+                    '<div class="task-progress">' +
+                        '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+                    '</div>' +
+                    '<div class="task-stats">' +
+                        '<div>总题数: <span>' + t.total + '</span></div>' +
+                        '<div>有答案: <span>' + t.has_answer + '</span></div>' +
+                        '<div>进度: <span>' + t.progress + '</span></div>' +
+                        (elapsed ? '<div>耗时: <span>' + esc(elapsed) + '</span></div>' : '') +
+                    '</div>' +
+                    (t.message ? '<div class="task-message">' + esc(t.message) + '</div>' : '') +
+                    '<div class="toggle-log" onclick="toggleLog(\'' + esc(t.task_id) + '\')">展开日志</div>' +
+                    '<div class="task-log" id="log-' + esc(t.task_id) + '">' + logs + '</div>' +
+                '</div>';
+            }).join('');
+
+            taskList.forEach(function(t) {
+                var logEl = document.getElementById('log-' + t.task_id);
+                if (logEl) logEl.scrollTop = logEl.scrollHeight;
+            });
+        }
+
+        async function loadFiles() {
+            try {
+                var res = await fetch('/api/files');
+                var files = await res.json();
+                var div = document.getElementById('fileList');
+                if (files.length === 0) {
+                    div.innerHTML = '<div style="color:#999;font-size:14px;">暂无文件</div>';
+                    return;
+                }
+                div.innerHTML = files.map(function(f) {
+                    var size = f.size > 1024*1024
+                        ? (f.size / 1024 / 1024).toFixed(1) + ' MB'
+                        : (f.size / 1024).toFixed(1) + ' KB';
+                    var date = new Date(f.time * 1000).toLocaleString('zh-CN');
+                    return '<div class="file-item">' +
+                        '<span class="file-name">' + esc(f.name) + '</span>' +
+                        '<div class="file-meta">' +
+                            '<span class="file-size">' + size + '</span>' +
+                            '<span class="file-size">' + date + '</span>' +
+                            '<a class="btn btn-download" href="/api/download/' + encodeURIComponent(f.name) + '" download>下载</a>' +
+                            '<span class="file-del" onclick="deleteFile(\'' + esc(f.name) + '\')">删除</span>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+            } catch (e) {}
+        }
+
+        async function deleteFile(name) {
+            if (!confirm('确定删除 ' + name + '？')) return;
+            try {
+                await fetch('/api/delete-file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name })
+                });
+                showToast('已删除', 'success');
+                loadFiles();
+            } catch (e) {
+                showToast('删除失败', 'error');
+            }
+        }
+
+        checkChrome();
+        loadFiles();
+        fetch('/api/tasks').then(function(r) { return r.json(); }).then(function(t) {
+            renderTasks(t);
+            if (t.some(function(x) { return x.running; })) startPolling();
+        });
+    </script>
+</body>
+</html>

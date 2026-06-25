@@ -1,0 +1,1412 @@
+"""考试宝爬取核心逻辑 - 共享模块"""
+
+import asyncio
+import json
+import re
+import html
+import subprocess
+import sys
+import io
+import time
+import socket
+import os
+from pathlib import Path
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+
+# OCR引擎（延迟加载）
+_ocr_engine = None
+def _get_ocr():
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+# Windows控制台GBK编码兼容：强制stdout/stderr为UTF-8
+if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+OUTPUT_DIR = Path.home() / "Desktop" / "kaoshibao"
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+CDP_PORT = 9222
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+
+# 支持的浏览器列表（按优先级排序：优先检测正在运行的）
+_BROWSER_PROFILES = [
+    {
+        'name': '360浏览器',
+        'process': '360ChromeX.exe',
+        'exe_path': str(Path.home() / "AppData/Local/360ChromeX/Chrome/Application/360ChromeX.exe"),
+        'user_data': str(Path.home() / "AppData/Local/360ChromeX/Chrome/User Data"),
+    },
+    {
+        'name': 'Google Chrome',
+        'process': 'chrome.exe',
+        'exe_path': r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        'user_data': str(Path.home() / "AppData/Local/Google/Chrome/User Data"),
+    },
+    {
+        'name': 'Edge',
+        'process': 'msedge.exe',
+        'exe_path': r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        'user_data': str(Path.home() / "AppData/Local/Microsoft/Edge/User Data"),
+    },
+]
+
+
+def is_port_open(port, host='127.0.0.1'):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex((host, port)) == 0
+
+
+def _detect_browser():
+    """检测当前正在运行的Chromium浏览器，返回浏览器配置或None"""
+    for browser in _BROWSER_PROFILES:
+        try:
+            r = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {browser['process']}", "/NH"],
+                capture_output=True, text=True, timeout=5
+            )
+            if browser['process'].lower() in r.stdout.lower():
+                # 验证exe路径存在
+                if Path(browser['exe_path']).exists():
+                    return browser
+        except Exception:
+            continue
+    return None
+
+
+def _detect_any_installed_browser():
+    """检测任意已安装的Chromium浏览器（不管是否在运行）"""
+    for browser in _BROWSER_PROFILES:
+        if Path(browser['exe_path']).exists():
+            return browser
+    return None
+
+
+def _start_browser_with_debug(browser):
+    """以调试模式启动指定浏览器"""
+    subprocess.Popen([
+        browser['exe_path'],
+        f"--remote-debugging-port={CDP_PORT}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--user-data-dir={browser['user_data']}",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(20):
+        time.sleep(1)
+        if is_port_open(CDP_PORT):
+            return True
+    return False
+
+
+def ensure_chrome_debug():
+    """
+    确保Chromium浏览器以调试模式运行。返回 (ok, message, chrome_restarted)
+
+    自动检测浏览器类型（Chrome/360/Edge），复用已有登录态。
+    """
+    if is_port_open(CDP_PORT):
+        return True, f"调试端口 {CDP_PORT} 已就绪，复用现有连接", False
+
+    # 检测正在运行的浏览器
+    running_browser = _detect_browser()
+
+    if running_browser:
+        # 有浏览器在运行但没开调试端口，需要重启
+        subprocess.run(["taskkill", "/F", "/IM", running_browser['process']],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        ok = _start_browser_with_debug(running_browser)
+        if ok:
+            return True, f"{running_browser['name']}已重启（调试模式），登录态已保留", True
+        return False, f"{running_browser['name']}重启失败，请手动关闭后重试", False
+
+    # 没有浏览器在运行，找一个已安装的启动
+    installed = _detect_any_installed_browser()
+    if not installed:
+        return False, "未找到Chrome/360浏览器/Edge，请先安装其中一个", False
+
+    ok = _start_browser_with_debug(installed)
+    if ok:
+        return True, f"{installed['name']}已启动，调试端口就绪", True
+    return False, f"{installed['name']}启动超时，请检查安装路径", False
+
+
+async def reopen_kaoshibao(playwright):
+    """Chrome重启后重新打开考试宝页面，检查登录态。返回 (page, logged_in)"""
+    try:
+        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        if not browser.contexts:
+            return None, False
+        context = browser.contexts[0]
+        page = await context.new_page()
+        await navigate_with_retry(page, 'https://www.kaoshibao.com/')
+        await asyncio.sleep(2)
+        logged_in = not await check_login_required(page)
+        return page, logged_in
+    except Exception as e:
+        print(f"reopen_kaoshibao失败: {e}")
+        return None, False
+
+
+def get_chrome_status():
+    """检查Chrome调试端口状态"""
+    return is_port_open(CDP_PORT)
+
+
+async def open_cdp_page(playwright):
+    """通过CDP连接Chrome并打开新标签页，返回 (browser, page)，失败返回 (None, None)"""
+    try:
+        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        if not browser.contexts:
+            return None, None
+        context = browser.contexts[0]
+        page = await context.new_page()
+        return browser, page
+    except Exception as e:
+        print(f"连接Chrome失败: {e}")
+        return None, None
+
+
+async def navigate_with_retry(page, url, retries=3, timeout=30000):
+    """带重试的页面导航"""
+    for attempt in range(retries):
+        try:
+            resp = await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            try:
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception:
+                pass
+            return resp
+        except Exception as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2)
+            else:
+                raise
+    return None
+
+
+async def close_popups(page):
+    """关闭弹窗（覆盖多种常见弹窗类型）"""
+    selectors = [
+        '.el-dialog__headerbtn',
+        '.membership-dialog .close',
+        '.el-dialog__close',
+        '.el-message-box__headerbtn',
+        '.el-notification__closeBtn',
+        '.el-alert__closebtn',
+        '[class*="modal"] .close',
+        '[class*="popup"] .close',
+        '.v-modal',
+        '.el-overlay .el-dialog__headerbtn',
+    ]
+    for _ in range(3):
+        try:
+            closed = await page.evaluate('''(sels) => {
+                let c = false;
+                sels.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(b => {
+                        if (b.offsetParent !== null) { b.click(); c = true; }
+                    });
+                });
+                // 也尝试按ESC关闭
+                if (!c) {
+                    const overlays = document.querySelectorAll('.el-overlay, .v-modal, [class*="modal-mask"]');
+                    if (overlays.length > 0) { document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); c = true; }
+                }
+                return c;
+            }''', selectors)
+            if not closed:
+                break
+            await asyncio.sleep(0.5)
+        except Exception:
+            break
+
+
+async def ocr_element_text(page, selector):
+    """截取DOM元素并用OCR识别真实文本（绕过字体反爬）"""
+    try:
+        el = await page.query_selector(selector)
+        if not el:
+            return ''
+        box = await el.bounding_box()
+        if not box or box['width'] < 5:
+            return ''
+        img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'ocr_temp.png')
+        await page.screenshot(path=img_path, clip={
+            'x': box['x'] - 2, 'y': box['y'] - 2,
+            'width': box['width'] + 4, 'height': box['height'] + 4,
+        })
+        return await _ocr_file(img_path)
+    except Exception:
+        return ''
+
+
+async def ocr_region_text(page, x, y, w, h):
+    """截取指定区域并用OCR识别"""
+    try:
+        img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'ocr_temp.png')
+        await page.screenshot(path=img_path, clip={
+            'x': x - 2, 'y': y - 2, 'width': w + 4, 'height': h + 4,
+        })
+        return await _ocr_file(img_path)
+    except Exception:
+        return ''
+
+
+async def _ocr_file(img_path):
+    """对图片文件执行OCR，自动加padding+放大提升识别率"""
+    from PIL import Image, ImageOps, ImageEnhance
+    ocr = _get_ocr()
+    img = Image.open(img_path)
+    # 放大3倍 + 白色边框 + 增强对比度
+    scaled = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+    enhanced = ImageEnhance.Contrast(scaled).enhance(1.5)
+    padded = ImageOps.expand(enhanced, border=20, fill='white')
+    padded_path = img_path.replace('.png', '_padded.png')
+    padded.save(padded_path)
+    result, _ = ocr(padded_path)
+    if not result:
+        # 兜底：灰度+二值化
+        gray = padded.convert('L')
+        bw = gray.point(lambda x: 0 if x < 140 else 255)
+        bw_path = img_path.replace('.png', '_bw.png')
+        bw.save(bw_path)
+        result, _ = ocr(bw_path)
+    if not result:
+        return ''
+    return ''.join(line[1] for line in result).strip()
+
+
+async def click_by_text(page, text):
+    """按文本点击元素，返回是否成功点击"""
+    # 方法1: Playwright text selector
+    try:
+        btn = await page.query_selector(f'text={text}')
+        if btn and await btn.is_visible():
+            await btn.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+    # 方法2: JS精确匹配叶子节点
+    clicked = await page.evaluate(f'''() => {{
+        for (const el of document.querySelectorAll('*')) {{
+            if (el.innerText?.trim() === '{text}' && el.offsetParent !== null && el.children.length === 0) {{
+                el.click(); return true;
+            }}
+        }}
+        return false;
+    }}''')
+    if clicked:
+        return True
+    # 方法3: JS模糊匹配（包含目标文本的可点击元素）
+    return await page.evaluate(f'''() => {{
+        const targets = document.querySelectorAll('a, button, [onclick], [role="button"]');
+        for (const el of targets) {{
+            if (el.innerText?.includes('{text}') && el.offsetParent !== null) {{
+                el.click(); return true;
+            }}
+        }}
+        // 最后尝试：任何包含文本的可见元素
+        for (const el of document.querySelectorAll('*')) {{
+            if (el.innerText?.includes('{text}') && el.offsetParent !== null && el.offsetHeight > 0) {{
+                el.click(); return true;
+            }}
+        }}
+        return false;
+    }}''')
+
+
+async def enable_recite_mode(page):
+    """开启背题模式，返回是否成功开启"""
+    enabled = await page.evaluate('''() => {
+        // 考试宝的背题模式开关可能在多个位置
+        // 方法1: .set p 中的 el-switch
+        const ps = document.querySelectorAll('.set p, .set-item, .setting-item');
+        for (const p of ps) {
+            if (p.innerText?.includes('背题模式')) {
+                const sw = p.querySelector('.el-switch');
+                if (sw) {
+                    if (!sw.classList.contains('is-checked')) sw.click();
+                    return true;
+                }
+            }
+        }
+        // 方法2: 直接查找包含"背题"的可点击元素
+        const allEls = document.querySelectorAll('.el-switch, [role="switch"]');
+        for (const el of allEls) {
+            const parent = el.closest('p, div, label');
+            if (parent && parent.innerText?.includes('背题')) {
+                if (!el.classList.contains('is-checked')) el.click();
+                return true;
+            }
+        }
+        return false;
+    }''')
+    await asyncio.sleep(2)
+    return enabled
+
+
+async def wait_for_question(page, timeout=10):
+    """等待题目元素出现（包含modal中的题目）"""
+    selectors = [
+        '.qusetion-title',
+        '.topic-top .question',
+        '.question-content',
+        '.topic-tit',
+        '[class*="exam_modal"]',
+    ]
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=timeout * 1000, state='visible')
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def get_current_question_dom(page):
+    """获取当前题目数据（DOM直接读取，速度快但有乱码）"""
+    data = await page.evaluate('''() => {
+        const r = { question: '', options: [], answer: '', analysis: '', type: '' };
+        const typeEl = document.querySelector('.topic-type');
+        if (typeEl) r.type = typeEl.innerText.trim();
+        const qEl = document.querySelector('.qusetion-title');
+        if (qEl) r.question = qEl.innerText.trim();
+        document.querySelectorAll('.option').forEach(opt => {
+            const t = opt.innerText.trim();
+            if (t) r.options.push(t);
+        });
+        const rights = document.querySelectorAll('.option.right');
+        if (rights.length > 0) {
+            const answers = [];
+            rights.forEach(opt => {
+                const icon = opt.querySelector('.before-icon');
+                if (icon) answers.push(icon.innerText.trim());
+            });
+            r.answer = answers.join(',');
+        }
+        const analEl = document.querySelector('.answer-box-detail');
+        if (analEl) r.analysis = analEl.innerText.trim();
+        return r;
+    }''')
+    return data
+
+
+async def get_current_question_hybrid(page):
+    """混合模式：DOM读结构 + OCR只读题目文本（速度和质量平衡）"""
+    from PIL import Image, ImageOps, ImageEnhance
+
+    # 先用DOM获取结构
+    dom_data = await get_current_question_dom(page)
+
+    # 只对题目文本用OCR
+    question = ''
+    try:
+        qEl = await page.query_selector('.qusetion-title')
+        if qEl:
+            box = await qEl.bounding_box()
+            if box and box['width'] > 10:
+                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'hybrid_q.png')
+                await page.screenshot(path=img_path, clip={
+                    'x': box['x'] - 5, 'y': box['y'] - 5,
+                    'width': box['width'] + 10, 'height': box['height'] + 10,
+                })
+                question = await _ocr_file(img_path)
+    except Exception:
+        pass
+
+    # 如果OCR失败，用DOM文本兜底
+    if not question or len(question) < 5:
+        question = dom_data.get('question', '')
+
+    dom_data['question'] = question
+    return dom_data
+
+
+async def get_current_question(page, mode='ocr'):
+    """获取当前题目数据"""
+    if mode == 'dom':
+        return await get_current_question_dom(page)
+    elif mode == 'hybrid':
+        return await get_current_question_hybrid(page)
+    from PIL import Image, ImageOps
+
+    # 正确答案和题型（DOM结构读取，不受字体影响）
+    answer = await page.evaluate('''() => {
+        const rights = document.querySelectorAll('.option.right');
+        if (rights.length > 0) {
+            const answers = [];
+            rights.forEach(opt => {
+                const icon = opt.querySelector('.before-icon');
+                if (icon) answers.push(icon.innerText.trim());
+            });
+            return answers.join(',');
+        }
+        const ansEl = document.querySelector('.right-ans');
+        if (ansEl) return ansEl.innerText.replace('正确答案', '').trim();
+        return '';
+    }''')
+
+    qtype = await page.evaluate('''() => {
+        const el = document.querySelector('.topic-type');
+        return el ? el.innerText.trim() : '';
+    }''')
+
+    # 截取整个modal区域 + OCR
+    question = ''
+    options = []
+    try:
+        modal = await page.query_selector('[class*="exam_modal"]')
+        if not modal:
+            modal = await page.query_selector('.topic-top')
+        if modal:
+            box = await modal.bounding_box()
+            if box and box['width'] > 50:
+                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'modal_ocr.png')
+                await page.screenshot(path=img_path, clip={
+                    'x': box['x'] - 10, 'y': box['y'] - 10,
+                    'width': box['width'] + 20, 'height': box['height'] + 20,
+                })
+                # 放大3倍+增强对比度+加padding
+                from PIL import ImageEnhance
+                img = Image.open(img_path)
+                scaled = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+                enhanced = ImageEnhance.Contrast(scaled).enhance(1.5)
+                padded = ImageOps.expand(enhanced, border=25, fill='white')
+                ocr_path = img_path.replace('.png', '_final.png')
+                padded.save(ocr_path)
+
+                ocr = _get_ocr()
+                result, _ = ocr(ocr_path)
+                if result:
+                    all_lines = [line[1].strip() for line in result if line[1].strip()]
+                    # 清理噪音行
+                    clean_lines = []
+                    for line in all_lines:
+                        # 跳过URL、域名、按钮、噪音
+                        if any(skip in line.lower() for skip in [
+                            'kaoshibao.com', 'www.', 'http', '下一题', '上一题',
+                            '收藏', '笔记', '举报', '斩题', 'aost', '请输入',
+                            '保存答案', '原解析', 'AI解析', 'VIP', '深度解题',
+                            '本解析由AI', '获取深度', '提供当日', 'hibao.', 'nibao.',
+                            'ww.kaos', 'ww.k', '.kaos', 'ao.com', 'no.com',
+                            'com', '≤', '☆', '但', '↑',
+                        ]):
+                            continue
+                        # 跳过纯噪音短行
+                        if len(line) < 3:
+                            continue
+                        # 跳过纯域名片段
+                        if re.match(r'^[a-z.]+$', line.lower()):
+                            continue
+                        clean_lines.append(line)
+
+                    # 解析题目和选项
+                    # 方法：从DOM获取选项数量，OCR文本中题目之后的内容按顺序分配给选项
+                    dom_info = await page.evaluate('''() => {
+                        const opts = document.querySelectorAll('.option');
+                        return {
+                            optCount: opts.length,
+                            hasQuestion: !!document.querySelector('.qusetion-title'),
+                        };
+                    }''')
+                    num_opts = dom_info.get('optCount', 4)
+
+                    # 分离题目和选项文本
+                    # 找题型行之后的内容
+                    start = 0
+                    for i, line in enumerate(clean_lines):
+                        if re.match(r'^(单选题|多选题|判断题|填空题|简答题)$', line):
+                            start = i + 1
+                            break
+
+                    # 从start开始，找题号行或题目行
+                    q_text = ''
+                    opt_start = start
+
+                    # 找题号行
+                    q_num_idx = -1
+                    for i in range(start, len(clean_lines)):
+                        line = clean_lines[i]
+                        m = re.search(r'\d+/\d+[、,.。]\s*', line)
+                        if m:
+                            q_text = line[m.end():].strip()
+                            prefix = line[:m.start()].strip()
+                            if prefix and not re.match(r'^[A-F]\s*[.、]', prefix):
+                                q_text = prefix + ' ' + q_text if q_text else prefix
+                            q_num_idx = i
+                            break
+
+                    # 题号之后，继续读取题目文本（跳过题型行），直到遇到选项或问号
+                    if q_num_idx >= 0:
+                        for i in range(q_num_idx + 1, len(clean_lines)):
+                            line = clean_lines[i]
+                            # 跳过题型行
+                            if re.match(r'^(单选题|多选题|判断题|填空题|简答题)$', line):
+                                continue
+                            # 遇到选项行停止
+                            if re.match(r'^[A-F]\s*[.、]', line):
+                                opt_start = i
+                                break
+                            # 拼接到题目
+                            q_text += (' ' if q_text else '') + line
+                            opt_start = i + 1
+                            # 如果题目已有问号，可能是完整题目
+                            if q_text.endswith('?') or q_text.endswith('？'):
+                                opt_start = i + 1
+                                break
+
+                    # 没找到题号行：第一个非选项行是题目
+                    if not q_text:
+                        for i in range(start, len(clean_lines)):
+                            line = clean_lines[i]
+                            if re.match(r'^[A-F]\s*[.、]', line):
+                                opt_start = i
+                                break
+                            q_text += (' ' if q_text else '') + line
+                            opt_start = i + 1
+
+                    # 去掉残留域名
+                    q_text = re.sub(r'\s*[a-z]{2,8}\.(com|cn|c)\b.*$', '', q_text, flags=re.IGNORECASE).strip()
+
+                    # 如果题目为空或太短，用DOM兜底
+                    if len(q_text) < 5:
+                        dom_q = await page.evaluate('() => document.querySelector(".qusetion-title")?.innerText?.trim() || ""')
+                        if dom_q:
+                            q_text = re.sub(r'[a-z]{2,8}\.(com|cn|c)\b.*', '', dom_q, flags=re.IGNORECASE).strip()
+
+                    # 用问号分割题目和选项（题目通常以?或？结尾）
+                    question = q_text
+                    if '?' in q_text or '？' in q_text:
+                        # 找最后一个问号
+                        last_q = max(q_text.rfind('?'), q_text.rfind('？'))
+                        # 只有当问号后面有足够内容时才分割（至少10字符）
+                        if last_q > 10 and last_q < len(q_text) - 10:
+                            question = q_text[:last_q + 1].strip()
+                            # 问号后面的内容作为选项
+                            extra_opts = q_text[last_q + 1:].strip()
+                            if extra_opts:
+                                for opt in re.split(r'\s+', extra_opts):
+                                    opt = opt.strip()
+                                    if len(opt) > 1 and opt not in options:
+                                        options.append(opt)
+
+                    # 选项：从opt_start开始，过滤噪音，取num_opts个有效选项
+                    content_lines = clean_lines[opt_start:]
+                    skip_words = ['下一题', '上一题', '收藏', '笔记', '举报', '斩题', '保存', '请输入',
+                                  '下一', '上一', '→', '☆', '≤', '但', '↑', '答案', '正确答案']
+                    for line in content_lines[:num_opts * 5]:
+                        cleaned = line.strip()
+                        # 去掉域名噪音
+                        cleaned = re.sub(r'\s*[a-z]{2,8}\.(com|cn|c)\b.*$', '', cleaned, flags=re.IGNORECASE)
+                        # 去掉按钮/导航文字
+                        if any(sw in cleaned for sw in skip_words):
+                            continue
+                        # 去掉纯噪音（太短、纯符号、纯数字）
+                        if len(cleaned) < 3:
+                            continue
+                        if re.match(r'^[a-z0-9.]+$', cleaned.lower()):
+                            continue
+                        cleaned = cleaned.strip()
+                        if cleaned:
+                            options.append(cleaned)
+                        if len(options) >= num_opts:
+                            break
+
+                    # 如果第一个"选项"看起来像题目（以?或"哪"结尾），移到题目
+                    if options and (not question or len(question) < 10):
+                        first = options[0]
+                        if first.endswith('?') or first.endswith('？') or '哪' in first[-5:] or '？' in first:
+                            question = first
+                            options = options[1:]
+    except Exception:
+        pass
+
+    # 解析（从分析区域OCR或DOM）
+    analysis = ''
+    try:
+        anal_el = await page.query_selector('.answer-box-detail')
+        if anal_el:
+            anal_box = await anal_el.bounding_box()
+            if anal_box and anal_box['width'] > 20:
+                from PIL import Image, ImageOps
+                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'anal_ocr.png')
+                await page.screenshot(path=img_path, clip={
+                    'x': anal_box['x'] - 5, 'y': anal_box['y'] - 5,
+                    'width': anal_box['width'] + 10, 'height': anal_box['height'] + 10,
+                })
+                from PIL import ImageEnhance
+                img = Image.open(img_path)
+                scaled = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+                enhanced = ImageEnhance.Contrast(scaled).enhance(1.5)
+                padded = ImageOps.expand(enhanced, border=20, fill='white')
+                ocr_path = img_path.replace('.png', '_final.png')
+                padded.save(ocr_path)
+                ocr = _get_ocr()
+                result, _ = ocr(ocr_path)
+                if result:
+                    analysis = ' '.join(line[1].strip() for line in result if line[1].strip())
+    except Exception:
+        pass
+
+    return {
+        'type': qtype,
+        'question': question,
+        'options': options,
+        'answer': answer,
+        'analysis': analysis,
+    }
+
+
+async def trigger_answer(page, question_type):
+    """根据题型触发答案显示，带重试"""
+    qtype = question_type or ''
+    for attempt in range(2):
+        # 检查答案是否已经显示（考试宝在背题模式下可能直接显示）
+        has_answer = await page.evaluate('''() => {
+            if (document.querySelector('.option.right')) return true;
+            if (document.querySelector('.right-ans, .correct-answer')) return true;
+            return false;
+        }''')
+        if has_answer:
+            return
+
+        if '填空' in qtype or '简答' in qtype or '问答' in qtype:
+            clicked = await page.evaluate('''() => {
+                const btns = document.querySelectorAll('button, .btn, a, [role="button"]');
+                for (const el of btns) {
+                    const txt = el.innerText?.trim();
+                    if ((txt === '查看答案' || txt === '确定' || txt === '提交' || txt === '查看解析') && el.offsetParent !== null) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+            if clicked:
+                await asyncio.sleep(2)
+        else:
+            # 点击第一个选项触发答案显示
+            await page.evaluate('''() => {
+                const opts = document.querySelectorAll('.option, .option-item');
+                for (const opt of opts) {
+                    if (opt.offsetParent !== null) { opt.click(); break; }
+                }
+            }''')
+            await asyncio.sleep(1.5)
+
+        # 再次检查
+        has_answer = await page.evaluate('''() => {
+            if (document.querySelector('.option.right')) return true;
+            if (document.querySelector('.right-ans, .correct-answer')) return true;
+            return false;
+        }''')
+        if has_answer:
+            return
+        await asyncio.sleep(1)
+
+
+async def click_next_question(page):
+    """点击下一题，多种方式尝试，返回是否成功"""
+    # 方法1: 考试宝专用 — .next-preve 中的"下一题"按钮
+    clicked = await page.evaluate('''() => {
+        // 考试宝的下一题按钮在 .next-preve 容器中
+        const btns = document.querySelectorAll('.next-preve button, .next-preve .el-button');
+        for (const b of btns) {
+            if (b.innerText?.includes('下一题') && b.offsetParent !== null) {
+                b.click();
+                return true;
+            }
+        }
+        // 通用：查找包含"下一题"的按钮
+        const allBtns = document.querySelectorAll('button, a, [role="button"]');
+        for (const b of allBtns) {
+            const txt = b.innerText?.trim();
+            if (txt && txt.includes('下一题') && b.offsetParent !== null) {
+                b.click();
+                return true;
+            }
+        }
+        return false;
+    }''')
+    if clicked:
+        await asyncio.sleep(2)
+        return True
+
+    # 方法2: Playwright text selector
+    next_selectors = [
+        'text=下一题',
+        'button:has-text("下一题")',
+        '.next-question',
+    ]
+    for sel in next_selectors:
+        try:
+            btn = await page.query_selector(sel)
+            if btn and await btn.is_visible():
+                await btn.click(timeout=3000)
+                await asyncio.sleep(2)
+                return True
+        except Exception:
+            continue
+
+    # 方法3: 键盘右箭头
+    try:
+        await page.keyboard.press('ArrowRight')
+        await asyncio.sleep(2)
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def inject_cookies(context, cookies):
+    """将cookies注入浏览器上下文"""
+    if not cookies:
+        return False
+    try:
+        playwright_cookies = []
+        for c in cookies:
+            if not c.get('name'):
+                continue
+            cookie = {
+                'name': c['name'],
+                'value': c.get('value', ''),
+                'domain': c.get('domain', '.kaoshibao.com'),
+                'path': c.get('path', '/'),
+            }
+            if c.get('expires'):
+                cookie['expires'] = c['expires']
+            if c.get('secure'):
+                cookie['secure'] = True
+            if c.get('httpOnly'):
+                cookie['httpOnly'] = True
+            if c.get('sameSite'):
+                ss = c['sameSite']
+                if ss in ('Strict', 'Lax', 'None'):
+                    cookie['sameSite'] = ss
+            playwright_cookies.append(cookie)
+        if not playwright_cookies:
+            return False
+        await context.add_cookies(playwright_cookies)
+        return True
+    except Exception as e:
+        print(f"注入cookies失败: {e}")
+        return False
+
+
+async def dump_page_info(page, log_fn=None):
+    """输出页面诊断信息"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(str(msg).encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
+
+    info = await page.evaluate('''() => {
+        const result = {};
+        // 页面标题
+        result.title = document.title;
+        // 所有可见链接
+        result.links = [];
+        document.querySelectorAll('a[href]').forEach(a => {
+            if (a.offsetParent !== null || a.offsetHeight > 0) {
+                const text = a.innerText?.trim().substring(0, 50);
+                const href = a.href;
+                if (text) result.links.push({text, href});
+            }
+        });
+        // 所有可见按钮
+        result.buttons = [];
+        document.querySelectorAll('button, [role="button"], .btn, [onclick]').forEach(b => {
+            if (b.offsetParent !== null || b.offsetHeight > 0) {
+                const text = b.innerText?.trim().substring(0, 50);
+                if (text) result.buttons.push(text);
+            }
+        });
+        // 页面主要文本内容（前500字符）
+        const body = document.body?.innerText || '';
+        result.bodyText = body.substring(0, 500);
+        // Vue/Element组件
+        result.vueComponents = document.querySelectorAll('[class*="el-"]').length;
+        return result;
+    }''')
+
+    log(f"  页面标题: {info.get('title', 'N/A')}")
+    log(f"  Vue组件数: {info.get('vueComponents', 0)}")
+    links = info.get('links', [])
+    if links:
+        log(f"  可见链接 ({len(links)}个):")
+        for l in links[:10]:
+            log(f"    [{l['text']}] -> {l['href']}")
+    buttons = info.get('buttons', [])
+    if buttons:
+        log(f"  可见按钮 ({len(buttons)}个):")
+        for b in buttons[:10]:
+            log(f"    [{b}]")
+    body_text = info.get('bodyText', '')
+    if body_text:
+        log(f"  页面文本(前200字): {body_text[:200]}")
+    return info
+
+
+async def check_login_required(page):
+    """检查是否需要登录（URL或DOM双重检测）"""
+    if 'login' in page.url.lower():
+        return True
+    return await page.evaluate('''() => {
+        // 检查登录表单、登录弹窗、二维码登录等
+        if (document.querySelector('.login-form, .login-box, .qrcode-login, #loginForm')) return true;
+        if (document.querySelector('[class*="login"]')) {
+            const el = document.querySelector('[class*="login"]');
+            if (el && el.offsetHeight > 100) return true;
+        }
+        return false;
+    }''')
+
+
+async def wait_for_login(page, log_fn=None, stop_check=None, timeout=300):
+    """等待用户在Chrome中完成登录，返回 True=已登录, False=超时/取消"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        print(msg)
+
+    log("需要登录考试宝，请在Chrome中扫码登录...")
+    start = time.time()
+    while time.time() - start < timeout:
+        if stop_check and stop_check():
+            log("用户取消")
+            return False
+        await asyncio.sleep(3)
+        try:
+            await page.reload(wait_until='domcontentloaded')
+            try:
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        except Exception:
+            await asyncio.sleep(2)
+            continue
+        if not await check_login_required(page):
+            log("登录成功!")
+            return True
+    log(f"等待登录超时（{timeout}秒）")
+    return False
+
+
+async def find_practice_url(page, paper_id, log_fn=None):
+    """尝试找到"顺序练习"的实际链接"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            pass
+
+    # 方法1: 从页面链接中提取（过滤掉javascript:伪链接）
+    practice_href = await page.evaluate('''() => {
+        const links = document.querySelectorAll('a[href]');
+        for (const a of links) {
+            const text = a.innerText?.trim();
+            const href = a.href || '';
+            if (text && text.includes('顺序练习') && href.startsWith('http')) {
+                return href;
+            }
+        }
+        for (const a of links) {
+            const text = a.innerText?.trim();
+            const href = a.href || '';
+            if (text && (text.includes('练习') || text.includes('开始')) && href.includes('/ti/') && href.startsWith('http')) {
+                return href;
+            }
+        }
+        return '';
+    }''')
+    if practice_href:
+        log(f"  找到练习链接: {practice_href}")
+        return practice_href
+
+    # 方法2: 尝试常见URL模式
+    candidates = [
+        f'https://www.kaoshibao.com/ti/{paper_id}/practice/',
+        f'https://www.kaoshibao.com/ti/{paper_id}/do/',
+        f'https://www.kaoshibao.com/ti/{paper_id}/exam/',
+        f'https://www.kaoshibao.com/ti/{paper_id}/?mode=practice',
+    ]
+    for url in candidates:
+        log(f"  尝试直接访问: {url}")
+        try:
+            resp = await navigate_with_retry(page, url, retries=1, timeout=15000)
+            await asyncio.sleep(2)
+            if resp and resp.status == 200 and not await check_login_required(page):
+                # 检查页面是否有题目相关元素
+                has_content = await page.evaluate('''() => {
+                    return document.querySelector('.topic-top, .question, .option-item, .set') !== null;
+                }''')
+                if has_content:
+                    log(f"  成功! URL: {page.url}")
+                    return page.url
+        except Exception:
+            continue
+
+    return None
+
+
+async def save_screenshot(page, name, log_fn=None):
+    """保存截图用于调试"""
+    try:
+        path = OUTPUT_DIR / f"debug_{name}_{int(time.time())}.png"
+        await page.screenshot(path=str(path), full_page=False)
+        if log_fn:
+            log_fn(f"截图已保存: {path.name}")
+    except Exception:
+        pass
+
+
+async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progress_fn=None,
+                           start_sequence=0, max_questions=0, mode='ocr'):
+    """
+    背题模式下收集所有题目+答案+解析
+
+    Args:
+        page: Playwright page
+        paper_id: 题库ID
+        log_fn: 日志回调 fn(msg)
+        stop_check: 停止检查回调 fn() -> bool
+        progress_fn: 进度回调 fn(collected, with_answer)
+        start_sequence: 起始题目序号（用于分段并行）
+        max_questions: 最多收集题目数（0=不限）
+    """
+    questions = []
+    existing_keys = set()
+
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
+
+    try:
+        log(f"打开题库页面 {paper_id}...")
+        await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+        await asyncio.sleep(2)
+        await close_popups(page)
+
+        # 如果需要登录，等待用户完成
+        if await check_login_required(page):
+            logged_in = await wait_for_login(page, log_fn, stop_check)
+            if not logged_in:
+                return questions, 'auth_error'
+            await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+            await asyncio.sleep(2)
+            await close_popups(page)
+            if await check_login_required(page):
+                log("登录后仍无法访问题库")
+                return questions, 'auth_error'
+
+        # 进入练习页面
+        if start_sequence > 0:
+            # 分段模式：直接跳到指定sequence
+            practice_url = (
+                f'https://www.kaoshibao.com/online/?paperId={paper_id}'
+                f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
+                f'&text=顺序练习&sequence={start_sequence}'
+                f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
+                f'&qtype_random_index={start_sequence}'
+            )
+            log(f"分段模式：跳到第 {start_sequence + 1} 题...")
+            await navigate_with_retry(page, practice_url)
+            await asyncio.sleep(3)
+            await close_popups(page)
+        else:
+            # 正常模式：点击顺序练习
+            log("页面诊断:")
+            await dump_page_info(page, log_fn)
+
+            paper_url = page.url
+            log("点击顺序练习...")
+
+            clicked = await page.evaluate('''() => {
+                const allItems = document.querySelectorAll('a.item, a[href="javascript:;"]');
+                for (const a of allItems) {
+                    if (a.innerText?.includes('顺序练习')) {
+                        ['mousedown', 'mouseup', 'click'].forEach(type => {
+                            a.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                        });
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+            log(f"  点击结果: {clicked}")
+
+            for wait_i in range(10):
+                await asyncio.sleep(1)
+                if page.url != paper_url:
+                    break
+            await close_popups(page)
+
+            if page.url == paper_url:
+                log("  URL未变化，尝试直接访问练习页面...")
+                practice_url = await find_practice_url(page, paper_id, log_fn)
+                if practice_url:
+                    await navigate_with_retry(page, practice_url)
+                    await asyncio.sleep(2)
+                    await close_popups(page)
+
+            # 检查是否被重定向到登录页
+            if await check_login_required(page):
+                log("进入练习页后需要登录...")
+                logged_in = await wait_for_login(page, log_fn, stop_check)
+                if not logged_in:
+                    return questions, 'auth_error'
+                await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+                await asyncio.sleep(2)
+                await close_popups(page)
+                await click_by_text(page, '顺序练习')
+                await asyncio.sleep(5)
+                await close_popups(page)
+                if await check_login_required(page):
+                    log("登录后仍无法进入练习页面")
+                    return questions, 'auth_error'
+
+        log(f"当前URL: {page.url}")
+
+        # 开启背题模式
+        log("开启背题模式...")
+        recite_ok = await enable_recite_mode(page)
+        if recite_ok:
+            log("背题模式已开启")
+        else:
+            log("未找到背题模式开关，继续尝试...")
+        await close_popups(page)
+
+        # 等待题目元素出现
+        found = await wait_for_question(page, timeout=10)
+        if not found:
+            log("题目元素未找到，等待5秒后重试...")
+            await asyncio.sleep(5)
+            found = await wait_for_question(page, timeout=10)
+            if not found:
+                log("题目元素仍未找到，输出诊断:")
+                await dump_page_info(page, log_fn)
+                await save_screenshot(page, 'no_question', log_fn)
+                return questions, 'error'
+
+        log("开始收集...")
+        consecutive_failures = 0
+        no_new_count = 0
+        last_success_i = 0  # 上次成功收集的迭代编号
+
+        async def recover_page():
+            """页面恢复：重新导航到练习页面"""
+            log("尝试恢复页面...")
+            try:
+                await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+                await asyncio.sleep(3)
+                await close_popups(page)
+                # 重新进入练习
+                practice_url = (
+                    f'https://www.kaoshibao.com/online/?paperId={paper_id}'
+                    f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
+                    f'&text=顺序练习&sequence={len(questions)}'
+                    f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
+                    f'&qtype_random_index={len(questions)}'
+                )
+                await navigate_with_retry(page, practice_url)
+                await asyncio.sleep(3)
+                await close_popups(page)
+                await enable_recite_mode(page)
+                await asyncio.sleep(2)
+                return True
+            except Exception as e:
+                log(f"恢复失败: {e}")
+                return False
+
+        for i in range(10000):
+            if stop_check and stop_check():
+                log("用户请求停止")
+                break
+
+            # 分段模式：达到最大题数后停止
+            if max_questions > 0 and len(questions) >= max_questions:
+                log(f"已达到分段上限 {max_questions} 题，停止收集")
+                break
+
+            # 检查登录是否过期
+            if await check_login_required(page):
+                log("登录已过期，尝试等待重新登录...")
+                logged_in = await wait_for_login(page, log_fn, stop_check, timeout=120)
+                if not logged_in:
+                    log("登录过期，停止收集")
+                    break
+                await recover_page()
+
+            await close_popups(page)
+
+            # 卡住检测：如果连续30次迭代没有新题目，尝试恢复页面
+            if i - last_success_i >= 30 and last_success_i > 0:
+                log(f"已连续{i - last_success_i}次无新题目，尝试恢复页面...")
+                if await recover_page():
+                    last_success_i = i
+                    consecutive_failures = 0
+                else:
+                    break
+
+            # 等待题目加载
+            loaded = await wait_for_question(page, timeout=10)
+            if not loaded:
+                consecutive_failures += 1
+                if consecutive_failures >= 20:
+                    log("连续20次未加载到题目，尝试恢复...")
+                    if await recover_page():
+                        consecutive_failures = 0
+                        continue
+                    else:
+                        break
+                await asyncio.sleep(2)
+                continue
+
+            data = await get_current_question(page, mode=mode)
+            # 判断题目是否有效：至少10字符，包含中文，不全是噪音
+            q_text = data.get('question', '')
+            has_chinese = bool(re.search(r'[一-鿿]', q_text))
+            is_valid = len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
+            if not is_valid:
+                consecutive_failures += 1
+                # OCR偶尔失败，重试
+                if consecutive_failures % 3 == 0:
+                    await asyncio.sleep(2)
+                    data = await get_current_question(page, mode=mode)
+                    q_text = data.get('question', '')
+                    has_chinese = bool(re.search(r'[一-鿿]', q_text))
+                    is_valid = len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
+                if not is_valid:
+                    if consecutive_failures >= 20:
+                        log("连续20次无法读取有效题目，尝试恢复...")
+                        if await recover_page():
+                            consecutive_failures = 0
+                            continue
+                        else:
+                            break
+                    await asyncio.sleep(1)
+                    continue
+            consecutive_failures = 0
+
+            # 触发答案显示
+            if not data.get('answer'):
+                await trigger_answer(page, data.get('type', ''))
+                data = await get_current_question(page, mode=mode)
+
+            # 去重并保存
+            q_key = data['question'][:80]
+            if q_key not in existing_keys:
+                questions.append({
+                    '序号': len(questions) + 1,
+                    '题目类型': data.get('type', ''),
+                    '题目': data.get('question', ''),
+                    '选项': data.get('options', []),
+                    '正确答案': data.get('answer', ''),
+                    '解析': data.get('analysis', '')
+                })
+                existing_keys.add(q_key)
+                no_new_count = 0
+                last_success_i = i
+
+                if progress_fn:
+                    has_ans = sum(1 for q in questions if q.get('正确答案'))
+                    progress_fn(len(questions), has_ans)
+
+                # 每题保存进度
+                save_progress(paper_id, questions, suffix=f'_{mode}' if mode and mode != 'ocr' else '')
+            else:
+                no_new_count += 1
+                if no_new_count >= 10:
+                    log("连续10题重复，可能已到末尾")
+                    break
+
+            # 定期日志
+            if (i + 1) % 10 == 0:
+                has_ans = sum(1 for q in questions if q.get('正确答案'))
+                log(f"已收集 {len(questions)} 题, 有答案 {has_ans} 题")
+
+            # 点击下一题
+            moved = await click_next_question(page)
+            if not moved:
+                await asyncio.sleep(2)
+                moved = await click_next_question(page)
+            if not moved:
+                consecutive_failures += 1
+                if consecutive_failures >= 15:
+                    log("连续15次无法翻到下一题，尝试恢复...")
+                    if await recover_page():
+                        consecutive_failures = 0
+                        continue
+                    else:
+                        break
+                await asyncio.sleep(2)
+
+        has_ans = sum(1 for q in questions if q.get('正确答案'))
+        log(f"完成: {len(questions)} 题, 有答案 {has_ans} 题")
+
+    except Exception as e:
+        log(f"出错: {e}")
+        await save_screenshot(page, 'error', log_fn)
+        return questions, 'error'
+
+    return questions, 'ok'
+
+
+def save_to_excel(questions, filepath):
+    """保存题目到Excel（选项分列显示）"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "题库"
+    headers = ['序号', '题目类型', '题目', '选项A', '选项B', '选项C', '选项D', '选项E', '选项F', '正确答案', '解析']
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal='center')
+    for row, q in enumerate(questions, 2):
+        ws.cell(row=row, column=1, value=q.get('序号', ''))
+        ws.cell(row=row, column=2, value=q.get('题目类型', ''))
+        ws.cell(row=row, column=3, value=q.get('题目', ''))
+
+        # 选项分列
+        opts = q.get('选项', [])
+        if isinstance(opts, str):
+            opts = [o.strip() for o in opts.split('\n') if o.strip()]
+        for i, opt in enumerate(opts[:6]):
+            # 去掉选项前面的A/B/C/D前缀（如果有）
+            cleaned = opt
+            if len(cleaned) > 2 and cleaned[0] in 'ABCDEF' and cleaned[1] in '.、 ':
+                cleaned = cleaned[2:].strip()
+            elif len(cleaned) > 3 and cleaned[0] in 'ABCDEF' and cleaned[1:3] in ['. ', '、 ']:
+                cleaned = cleaned[3:].strip()
+            ws.cell(row=row, column=4 + i, value=cleaned)
+
+        ws.cell(row=row, column=10, value=q.get('正确答案', ''))
+        ws.cell(row=row, column=11, value=q.get('解析', ''))
+
+        # 格式
+        for col in [3, 4, 5, 6, 7, 8, 9, 11]:
+            ws.cell(row=row, column=col).alignment = Alignment(wrap_text=True, vertical='top')
+
+    ws.column_dimensions['A'].width = 6
+    ws.column_dimensions['B'].width = 8
+    ws.column_dimensions['C'].width = 50
+    ws.column_dimensions['D'].width = 30
+    ws.column_dimensions['E'].width = 30
+    ws.column_dimensions['F'].width = 30
+    ws.column_dimensions['G'].width = 30
+    ws.column_dimensions['H'].width = 20
+    ws.column_dimensions['I'].width = 20
+    ws.column_dimensions['J'].width = 12
+    ws.column_dimensions['K'].width = 40
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f"A1:K{len(questions) + 1}"
+    wb.save(filepath)
+
+
+def load_progress(paper_id, suffix=''):
+    """加载已有进度"""
+    progress_file = OUTPUT_DIR / f"progress_{paper_id}{suffix}.json"
+    if progress_file.exists():
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def save_progress(paper_id, questions, suffix=''):
+    """保存进度"""
+    progress_file = OUTPUT_DIR / f"progress_{paper_id}{suffix}.json"
+    with open(progress_file, 'w', encoding='utf-8') as f:
+        json.dump(questions, f, ensure_ascii=False, indent=2)
+
+
+def load_segment_progress(paper_id, segment_id):
+    """加载分段进度"""
+    progress_file = OUTPUT_DIR / f"progress_{paper_id}_seg{segment_id}.json"
+    if progress_file.exists():
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def save_segment_progress(paper_id, segment_id, questions):
+    """保存分段进度"""
+    progress_file = OUTPUT_DIR / f"progress_{paper_id}_seg{segment_id}.json"
+    with open(progress_file, 'w', encoding='utf-8') as f:
+        json.dump(questions, f, ensure_ascii=False, indent=2)
+
+
+def merge_segments(paper_id, num_segments):
+    """合并所有分段的结果，去重后保存为最终文件"""
+    all_questions = []
+    seen = set()
+    for seg_id in range(num_segments):
+        seg_questions = load_segment_progress(paper_id, seg_id)
+        for q in seg_questions:
+            key = q.get('题目', '')[:80]
+            if key and key not in seen:
+                seen.add(key)
+                all_questions.append(q)
+    # 重新编号
+    for i, q in enumerate(all_questions):
+        q['序号'] = i + 1
+    if all_questions:
+        save_progress(paper_id, all_questions)
+        output_file = OUTPUT_DIR / f"考试宝题库_{paper_id}.xlsx"
+        save_to_excel(all_questions, output_file)
+    # 清理分段文件
+    for seg_id in range(num_segments):
+        seg_file = OUTPUT_DIR / f"progress_{paper_id}_seg{seg_id}.json"
+        if seg_file.exists():
+            seg_file.unlink()
+    return all_questions
+
+
+def validate_paper_id(raw):
+    """验证并提取题库ID，返回 (paper_id, error_msg)"""
+    raw = raw.strip()
+    if not raw:
+        return None, '请输入题库ID'
+    if 'kaoshibao.com' in raw:
+        m = re.search(r'/ti/(\d+)', raw)
+        if m:
+            return m.group(1), None
+        return None, '无法从URL中提取题库ID'
+    if not raw.isdigit():
+        return None, '题库ID必须是数字'
+    if len(raw) > 20:
+        return None, '题库ID过长'
+    return raw, None
+
+
+def sanitize_text(text):
+    """转义HTML特殊字符，用于前端安全渲染"""
+    if not text:
+        return ''
+    return html.escape(str(text))

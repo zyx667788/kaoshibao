@@ -1,0 +1,78 @@
+# 考试宝题库爬取技能
+
+## 技能描述
+自动爬取考试宝(kaoshibao.com)已购买题库的全部题目、选项、正确答案和解析，保存为Excel文件。
+通过Chrome CDP协议连接已登录的Chrome浏览器，直接复用登录态。
+
+## 触发词
+- 考试宝
+- 题库爬取
+- kaoshibao
+- 爬题
+
+## 依赖安装
+```bash
+pip install playwright openpyxl flask
+playwright install chromium
+```
+
+## 使用方式
+
+### Web界面（推荐）
+```bash
+python app.py
+# 浏览器自动打开 http://localhost:5678
+```
+
+### 命令行
+```bash
+python scrape.py <题库ID>
+# 例: python scrape.py 13573440
+```
+
+## 工作原理
+
+### Chrome CDP模式
+1. 启动时以调试模式（`--remote-debugging-port=9222`）重启Chrome
+2. 通过Playwright的CDP协议连接Chrome，每个任务在新标签页中执行
+3. 直接复用Chrome已登录的完整会话（包括httpOnly cookies）
+4. 开启背题模式，一次遍历收集题目+答案+解析
+
+### 为什么用CDP而不是cookie注入？
+`document.cookie` 无法获取httpOnly的认证cookie，导致注入的cookies不完整，点击"顺序练习"后会被重定向到登录页。CDP连接直接使用Chrome的完整会话，所有cookie都可用。
+
+## 页面结构（关键CSS选择器）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 题型 | `.topic-top .type` 或 `.clearfix .type` | 单选题/多选题 |
+| 题目 | `.topic-top .question` 或 `.topic-tit` | 题目文本 |
+| 选项 | `.option-item` | A/B/C/D选项列表 |
+| 正确答案 | `.right-ans` | 背题模式下自动显示 |
+| 解析 | `.answer-box-detail` | 解析内容 |
+| 背题模式开关 | `.set p` 含"背题模式" → `.el-switch` | 右下角设置 |
+| 下一题 | `text=下一题` | 翻页按钮 |
+
+## 输出格式
+
+| 列名 | 说明 | 示例 |
+|------|------|------|
+| 序号 | 题目序号 | 1, 2, 3... |
+| 题目类型 | 单选题/多选题/判断题/简答题 | 单选题 |
+| 题目 | 题目内容 | 在OpenStack中... |
+| 选项 | A/B/C/D选项，换行分隔 | A. xxx\nB. xxx\n... |
+| 正确答案 | 正确选项字母 | A / ABD / ABCD |
+| 解析 | 题目解析 | 原解析文本 |
+
+## 文件结构
+```
+kaoshibao/
+├── app.py                   # Web服务器
+├── scrape.py                # 命令行爬取脚本
+├── scraper_core.py          # 共享核心模块
+├── templates/index.html     # Web界面
+├── 启动.bat                 # 一键启动脚本
+├── test_all.py              # 测试套件
+├── progress_<题库ID>.json   # 断点续传进度文件
+└── 考试宝题库_<题库ID>.xlsx  # 输出Excel
+```
