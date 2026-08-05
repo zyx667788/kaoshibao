@@ -14,6 +14,11 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 
+# 日志配置
+from logging_config import init_default_logger, get_logger
+init_default_logger(level="INFO")
+logger = get_logger("kaoshibao.scraper_core")
+
 # OCR引擎（延迟加载）
 _ocr_engine = None
 def _get_ocr():
@@ -153,7 +158,7 @@ async def reopen_kaoshibao(playwright):
         logged_in = not await check_login_required(page)
         return page, logged_in
     except Exception as e:
-        print(f"reopen_kaoshibao失败: {e}")
+        logger.error(f"reopen_kaoshibao失败: {e}")
         return None, False
 
 
@@ -172,7 +177,7 @@ async def open_cdp_page(playwright):
         page = await context.new_page()
         return browser, page
     except Exception as e:
-        print(f"连接Chrome失败: {e}")
+        logger.error(f"连接Chrome失败: {e}")
         return None, None
 
 
@@ -800,7 +805,7 @@ async def inject_cookies(context, cookies):
         await context.add_cookies(playwright_cookies)
         return True
     except Exception as e:
-        print(f"注入cookies失败: {e}")
+        logger.error(f"注入cookies失败: {e}")
         return False
 
 
@@ -810,9 +815,9 @@ async def dump_page_info(page, log_fn=None):
         if log_fn:
             log_fn(msg)
         try:
-            print(msg)
+            logger.info(msg)
         except UnicodeEncodeError:
-            print(str(msg).encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
+            logger.info(str(msg).encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
 
     info = await page.evaluate('''() => {
         const result = {};
@@ -881,7 +886,7 @@ async def wait_for_login(page, log_fn=None, stop_check=None, timeout=300):
     def log(msg):
         if log_fn:
             log_fn(msg)
-        print(msg)
+        logger.info(msg)
 
     log("需要登录考试宝，请在Chrome中扫码登录...")
     start = time.time()
@@ -912,10 +917,7 @@ async def find_practice_url(page, paper_id, log_fn=None):
     def log(msg):
         if log_fn:
             log_fn(msg)
-        try:
-            print(msg)
-        except UnicodeEncodeError:
-            pass
+        logger.info(msg)
 
     # 方法1: 从页面链接中提取（过滤掉javascript:伪链接）
     practice_href = await page.evaluate('''() => {
@@ -997,10 +999,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
     def log(msg):
         if log_fn:
             log_fn(msg)
-        try:
-            print(msg)
-        except UnicodeEncodeError:
-            print(msg.encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
+        logger.info(msg)
 
     try:
         log(f"打开题库页面 {paper_id}...")

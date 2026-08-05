@@ -1,0 +1,84 @@
+# Nginx配置模板 - 考试宝题库爬取工具
+# 复制到 /etc/nginx/sites-available/kaoshibao 并创建软链接到 sites-enabled
+
+server {
+    listen 80;
+    server_name kaoshibao.example.com;  # 修改为实际域名
+
+    # 安全头
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+
+    # 静态文件缓存（如果有前端构建产物）
+    # location /static/ {
+    #     alias /home/user/kaoshibao/static/;
+    #     expires 1y;
+    #     add_header Cache-Control "public, immutable";
+    # }
+
+    # 代理到Flask应用
+    location / {
+        proxy_pass http://127.0.0.1:5678;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+
+        # 缓冲区设置
+        proxy_buffering on;
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+    }
+
+    # WebSocket支持（如需要实时功能）
+    location /ws/ {
+        proxy_pass http://127.0.0.1:5678;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+    }
+
+    # 禁止访问敏感文件
+    location ~ /\.(git|env|pyc|log)$ {
+        deny all;
+    }
+
+    # 访问日志
+    access_log /var/log/nginx/kaoshibao_access.log;
+    error_log /var/log/nginx/kaoshibao_error.log;
+}
+
+# HTTPS配置示例（使用Certbot自动配置后取消注释）
+# server {
+#     listen 443 ssl http2;
+#     server_name kaoshibao.example.com;
+#
+#     ssl_certificate /etc/letsencrypt/live/kaoshibao.example.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/kaoshibao.example.com/privkey.pem;
+#
+#     # SSL优化配置
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     ssl_ciphers HIGH:!aNULL:!MD5;
+#
+#     # ... 复用上述location配置 ...
+# }
+#
+# server {
+#     listen 80;
+#     server_name kaoshibao.example.com;
+#     return 301 https://$server_name$request_uri;
+# }

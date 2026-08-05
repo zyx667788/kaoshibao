@@ -17,5 +17,13 @@ echo.
 echo   浏览器将自动打开 http://localhost:5678
 echo   关闭此窗口将停止服务
 echo.
-python app.py
+
+REM 优先使用虚拟环境中的Python
+if exist venv\Scripts\python.exe (
+    echo 使用虚拟环境启动...
+    venv\Scripts\python app.py
+) else (
+    echo 使用系统Python启动...
+    python app.py
+)
 pause

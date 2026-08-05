@@ -1,0 +1,28 @@
+[Unit]
+Description=考试宝题库爬取工具
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/home/user/kaoshibao
+Environment=PATH=/home/user/kaoshibao/venv/bin
+ExecStart=/home/user/kaoshibao/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/user/kaoshibao/logs /home/user/kaoshibao/output
+
+# 资源限制
+MemoryMax=1G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

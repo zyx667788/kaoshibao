@@ -17,9 +17,15 @@ from scraper_core import (
     reopen_kaoshibao, load_segment_progress, save_segment_progress, merge_segments
 )
 
+from logging_config import init_default_logger, get_logger
+
 if not isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# 初始化日志
+init_default_logger(level="INFO")
+logger = get_logger("kaoshibao.app")
 
 app = Flask(__name__, template_folder=str(Path(__file__).parent / 'templates'))
 
@@ -176,6 +182,7 @@ def run_task(task_id):
                     return questions
 
                 except Exception as e:
+                    logger.exception(f"爬取出错: {e}")
                     task_log(task, f"爬取出错: {e}")
                     return questions
                 finally:
@@ -200,6 +207,7 @@ def run_task(task_id):
         task['message'] = f"完成! {len(questions)}题, {task['has_answer']}道有答案"
 
     except Exception as e:
+        logger.exception(f"任务执行错误: {e}")
         task_log(task, f"错误: {e}")
         task['phase'] = 'error'
         task['message'] = f"错误: {e}"
@@ -225,6 +233,7 @@ def chrome_status():
 def chrome_start():
     if not check_rate_limit(request.remote_addr, 5.0):
         return jsonify({'error': '操作太频繁'}), 429
+    logger.info(f"Chrome启动请求 from {request.remote_addr}")
     ok, msg, restarted = ensure_chrome_debug()
 
     login_status = None
@@ -253,8 +262,9 @@ def chrome_start():
             login_status = loop.run_until_complete(reopen_pages())
             loop.close()
         except Exception as e:
-            print(f"Chrome重启后打开页面失败: {e}")
+            logger.error(f"Chrome重启后打开页面失败: {e}")
 
+    logger.info(f"Chrome启动结果: ok={ok}, restarted={restarted}, logged_in={login_status}")
     return jsonify({'ok': ok, 'message': msg, 'restarted': restarted, 'logged_in': login_status})
 
 
@@ -556,9 +566,9 @@ def merge_segments_api():
 
 
 if __name__ == '__main__':
-    print("正在检查Chrome...")
+    logger.info("正在检查Chrome...")
     ok, msg, restarted = ensure_chrome_debug()
-    print(msg)
+    logger.info(msg)
 
     import webbrowser
     # Chrome就绪后再打开页面（如果Chrome重启了，新窗口里打开）
@@ -566,6 +576,6 @@ if __name__ == '__main__':
         time.sleep(1)  # 等Chrome完全就绪
         webbrowser.open('http://localhost:5678')
     else:
-        print("Chrome未就绪，请手动打开 http://localhost:5678")
+        logger.warning("Chrome未就绪，请手动打开 http://localhost:5678")
 
     app.run(host='0.0.0.0', port=5678, debug=False)

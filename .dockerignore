@@ -1,0 +1,78 @@
+# Docker忽略文件
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.xlsx
+cookies.json
+progress_*.json
+font_mapping.json
+debug_*.png
+*.log
+
+# Output directory
+output/
+logs/
+data/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Playwright
+playwright/.local-browsers/
+ms-playwright/
+
+# Deploy files
+deploy.sh
+deploy.bat
+ecosystem.config.js
+nginx.conf.template
+kaoshibao.service
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+README.md

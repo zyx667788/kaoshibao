@@ -1,10 +1,56 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.env
-*.log
-progress_*.json
-cookies.json
-debug/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
 *.xlsx
-screenshot.png
+cookies.json
+progress_*.json
+font_mapping.json
+debug_*.png
+*.log
+
+# Output directory
+~/Desktop/kaoshibao/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Playwright
+playwright/.local-browsers/
