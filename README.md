@@ -1,5 +1,14 @@
 # 考试宝题库爬取工具
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-42%20Passing-brightgreen)
+![Architecture](https://img.shields.io/badge/Architecture-Flask%20%2B%20Playwright%20%2B%20RapidOCR-orange)
+[![GitHub Stars](https://img.shields.io/github/stars/DeXuan/kaoshibao?style=social)](https://github.com/DeXuan/kaoshibao)
+[![GitHub Issues](https://img.shields.io/github/issues/DeXuan/kaoshibao)](https://github.com/DeXuan/kaoshibao/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/DeXuan/kaoshibao)](https://github.com/DeXuan/kaoshibao/commits/master)
+
 自动爬取考试宝(kaoshibao.com)已购买题库的全部题目、选项、正确答案和解析，导出为格式化的 Excel 文件。
 
 ## 核心特性
@@ -16,26 +25,42 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：一键部署脚本（推荐，含依赖安装+测试）
 
 ```bash
-pip install playwright openpyxl flask rapidocr_onnxruntime Pillow
-playwright install chromium
+# Linux/macOS
+./deploy.sh
+
+# Windows
+deploy.bat
 ```
 
-### 2. 启动
-
-**方式一：双击启动（推荐）**
-
-双击 `启动.bat`，自动以调试模式重启 Chrome 并打开 Web 界面 `http://localhost:5678`。
-
-**方式二：命令行启动**
+### 方式二：Docker 容器化部署
 
 ```bash
+# 构建并启动
+docker-compose up -d --build
+
+# 查看日志
+docker-compose logs -f
+
+# 停止
+docker-compose down
+```
+
+### 方式三：手动安装依赖
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
 python app.py
 ```
 
-### 3. 使用
+### 方式四：双击启动（Windows 推荐）
+
+双击 `启动.bat`，自动以调试模式重启 Chrome 并打开 Web 界面 `http://localhost:5678`。
+
+### 5. 使用
 
 1. 在 Chrome 中登录考试宝 (kaoshibao.com)
 2. 在 Web 界面输入题库 ID，点击"添加任务"
@@ -152,6 +177,52 @@ kaoshibao/
 2. Google Chrome
 3. Microsoft Edge
 
+## 生产环境部署
+
+### PM2 进程管理
+```bash
+# 安装 PM2
+npm install -g pm2
+
+# 启动
+pm2 start ecosystem.config.js
+
+# 查看状态
+pm2 status
+
+# 查看日志
+pm2 logs kaoshibao
+
+# 开机自启
+pm2 startup && pm2 save
+```
+
+### Systemd 服务
+```bash
+# 复制服务文件
+sudo cp kaoshibao.service /etc/systemd/system/
+# 修改 WorkingDirectory 和 User
+sudo systemctl daemon-reload
+sudo systemctl enable --now kaoshibao
+```
+
+### Nginx 反向代理
+```bash
+# 复制配置并修改域名
+sudo cp nginx.conf.template /etc/nginx/sites-available/kaoshibao
+sudo ln -s /etc/nginx/sites-available/kaoshibao /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# HTTPS (Certbot)
+sudo certbot --nginx -d kaoshibao.example.com
+```
+
+### Docker 部署
+```bash
+docker-compose up -d --build
+# 包含健康检查、资源限制、非 root 用户运行
+```
+
 ## 运行测试
 
 ```bash
@@ -172,9 +243,13 @@ python test_all.py
 
 ## 技术栈
 
-- **Python 3.13+**
+- **Python 3.10+**
 - **Flask** — Web 服务器
 - **Playwright** (async) — 浏览器自动化 / CDP 协议
 - **RapidOCR** (ONNX Runtime) — OCR 引擎
 - **Pillow** — 图片预处理（缩放、对比度增强、灰度/二值化）
 - **openpyxl** — Excel 生成（格式化、冻结窗格、自动筛选）
+
+## 许可证
+
+MIT License — 详见 [LICENSE](LICENSE) 文件
