@@ -2,12 +2,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&logoColor=white)
 ![Tests](https://img.shields.io/badge/Tests-42%20Passing-brightgreen)
-![Architecture](https://img.shields.io/badge/Architecture-Flask%20%2B%20Playwright%20%2B%20RapidOCR-orange)
-[![GitHub Stars](https://img.shields.io/github/stars/DeXuan/kaoshibao?style=social)](https://github.com/DeXuan/kaoshibao)
-[![GitHub Issues](https://img.shields.io/github/issues/DeXuan/kaoshibao)](https://github.com/DeXuan/kaoshibao/issues)
-[![Last Commit](https://img.shields.io/github/last-commit/DeXuan/kaoshibao)](https://github.com/DeXuan/kaoshibao/commits/master)
+![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&logoColor=white)
 
 自动爬取考试宝(kaoshibao.com)已购买题库的全部题目、选项、正确答案和解析，导出为格式化的 Excel 文件。
 
