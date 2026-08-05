@@ -36,8 +36,14 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
     except Exception:
         pass
 
-OUTPUT_DIR = Path.home() / "Desktop" / "kaoshibao"
+# 项目根目录
+PROJECT_ROOT = Path(__file__).parent
+OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# 数据目录（进度文件、cookies、字体映射）
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
 
 CDP_PORT = 9222
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
@@ -1325,7 +1331,7 @@ def save_to_excel(questions, filepath):
 
 def load_progress(paper_id, suffix=''):
     """加载已有进度"""
-    progress_file = OUTPUT_DIR / f"progress_{paper_id}{suffix}.json"
+    progress_file = DATA_DIR / f"progress_{paper_id}{suffix}.json"
     if progress_file.exists():
         try:
             with open(progress_file, 'r', encoding='utf-8') as f:
@@ -1337,14 +1343,14 @@ def load_progress(paper_id, suffix=''):
 
 def save_progress(paper_id, questions, suffix=''):
     """保存进度"""
-    progress_file = OUTPUT_DIR / f"progress_{paper_id}{suffix}.json"
+    progress_file = DATA_DIR / f"progress_{paper_id}{suffix}.json"
     with open(progress_file, 'w', encoding='utf-8') as f:
         json.dump(questions, f, ensure_ascii=False, indent=2)
 
 
 def load_segment_progress(paper_id, segment_id):
     """加载分段进度"""
-    progress_file = OUTPUT_DIR / f"progress_{paper_id}_seg{segment_id}.json"
+    progress_file = DATA_DIR / f"progress_{paper_id}_seg{segment_id}.json"
     if progress_file.exists():
         try:
             with open(progress_file, 'r', encoding='utf-8') as f:
@@ -1356,7 +1362,7 @@ def load_segment_progress(paper_id, segment_id):
 
 def save_segment_progress(paper_id, segment_id, questions):
     """保存分段进度"""
-    progress_file = OUTPUT_DIR / f"progress_{paper_id}_seg{segment_id}.json"
+    progress_file = DATA_DIR / f"progress_{paper_id}_seg{segment_id}.json"
     with open(progress_file, 'w', encoding='utf-8') as f:
         json.dump(questions, f, ensure_ascii=False, indent=2)
 
@@ -1381,7 +1387,7 @@ def merge_segments(paper_id, num_segments):
         save_to_excel(all_questions, output_file)
     # 清理分段文件
     for seg_id in range(num_segments):
-        seg_file = OUTPUT_DIR / f"progress_{paper_id}_seg{seg_id}.json"
+        seg_file = DATA_DIR / f"progress_{paper_id}_seg{seg_id}.json"
         if seg_file.exists():
             seg_file.unlink()
     return all_questions

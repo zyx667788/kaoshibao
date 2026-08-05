@@ -46,7 +46,7 @@ print("\n=== scraper_core ===")
 
 from scraper_core import (
     validate_paper_id, sanitize_text, save_to_excel,
-    load_progress, save_progress, OUTPUT_DIR,
+    load_progress, save_progress, OUTPUT_DIR, DATA_DIR,
     is_port_open, get_chrome_status, ensure_chrome_debug,
     open_cdp_page, CDP_PORT, _BROWSER_PROFILES,
     check_login_required, wait_for_question, click_next_question,
@@ -119,7 +119,7 @@ def test_save_load_progress():
     loaded = load_progress("test_88888")
     assert_eq(len(loaded), 1)
     assert_eq(loaded[0]['题目'], '测试')
-    (OUTPUT_DIR / "progress_test_88888.json").unlink()
+    (DATA_DIR / "progress_test_88888.json").unlink()
 
 
 def test_load_progress_missing():
@@ -128,10 +128,10 @@ def test_load_progress_missing():
 
 def test_load_progress_corrupt():
     pid = "test_corrupt"
-    with open(OUTPUT_DIR / f"progress_{pid}.json", 'w') as f:
+    with open(DATA_DIR / f"progress_{pid}.json", 'w') as f:
         f.write("not json{{{")
     assert_eq(load_progress(pid), [])
-    (OUTPUT_DIR / f"progress_{pid}.json").unlink()
+    (DATA_DIR / f"progress_{pid}.json").unlink()
 
 
 def test_save_excel():

@@ -36,16 +36,11 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Project specific
-*.xlsx
-cookies.json
-progress_*.json
-font_mapping.json
-debug_*.png
+# Project specific - 数据和输出目录
+data/
+output/
+logs/
 *.log
-
-# Output directory
-~/Desktop/kaoshibao/
 
 # Test coverage
 .coverage
@@ -54,3 +49,13 @@ htmlcov/
 
 # Playwright
 playwright/.local-browsers/
+
+# 部署文件（不提交到仓库）
+ecosystem.config.js
+nginx.conf.template
+kaoshibao.service
+Dockerfile
+docker-compose.yml
+.dockerignore
+deploy.sh
+deploy.bat

@@ -11,7 +11,7 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file
 
 from scraper_core import (
-    OUTPUT_DIR, collect_questions,
+    OUTPUT_DIR, DATA_DIR, CDP_URL, collect_questions,
     save_to_excel, load_progress, save_progress,
     validate_paper_id, ensure_chrome_debug, get_chrome_status, open_cdp_page,
     reopen_kaoshibao, load_segment_progress, save_segment_progress, merge_segments
