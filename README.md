@@ -11,6 +11,8 @@
 ## 核心特性
 
 - **Chrome CDP 模式** — 连接已登录的 Chrome 浏览器，直接复用完整登录态（包括 httpOnly cookies），无需手动管理 cookies
+- **跨平台支持** — Windows / Linux 自动检测浏览器路径，Linux 下通过 Xvfb 虚拟显示器运行 Chrome
+- **noVNC 远程浏览器** — 服务器部署时通过 Web 浏览器远程操作 Chrome 登录考试宝，无需桌面环境
 - **多种读取模式** — OCR 模式（最准）、DOM 模式（最快）、混合模式（推荐）、竞赛模式（三种同时运行对比）
 - **多任务并行** — 最多 5 个题库同时爬取，每个任务独立标签页、独立进度
 - **分段并行爬取** — 单个题库可拆分为 2-5 个分段并行爬取，速度提升 2-5 倍
@@ -56,6 +58,15 @@ gunicorn --bind 0.0.0.0:5678 --workers 1 --timeout 120 app:app
 2. 在 Web 界面输入题库 ID，点击"添加任务"
 3. 等待爬取完成，下载 Excel 文件
 
+### 服务器远程登录（noVNC）
+
+服务器无桌面环境时，通过 noVNC 在浏览器中远程操作 Chrome 登录：
+
+1. 打开 `http://<服务器IP>:<端口>/vnc/vnc.html`（如 `http://111.229.32.106:9007/vnc/vnc.html`）
+2. 输入 VNC 密码，看到 Chrome 浏览器界面
+3. 在 Chrome 中登录考试宝（扫码或账号登录）
+4. 登录成功后，打开 Web 管理界面 `http://<服务器IP>:<端口>/web/` 开始爬取
+
 ## 读取模式
 
 | 模式 | 速度 | 准确度 | 说明 |
@@ -83,10 +94,13 @@ kaoshibao/
 ├── pyproject.toml                # ruff 代码风格配置
 ├── Dockerfile                    # 多阶段构建 + gunicorn
 ├── docker-compose.yml            # 容器编排
-├── kaoshibao.service            .         # systemd 服务文件
-├── nginx_kaoshibao.conf          # nginx 反向代理配置
+├── kaoshibao.service             # systemd 服务文件（依赖 xvfb.service）
+├── xvfb.service                  # Xvfb 虚拟显示器服务（Linux Chrome 需要）
+├── x11vnc.service                # VNC 服务器服务（连接 Xvfb display :99）
+├── novnc.service                 # noVNC WebSocket 代理服务（Web 远程浏览器）
+├── nginx_kaoshibao.conf          # nginx 反向代理配置（/web/ + /vnc/）
 ├── requirements.txt              # Python 依赖
-└── OPTIMIZATION.md               # 优化记录文档（8 轮 66 项）
+└── OPTIMIZATION.md               # 优化记录文档（9 轮 69 项）
 ```
 
 ## REST API
@@ -115,6 +129,7 @@ API 文档通过 OpenAPI 3.0 规范提供，访问 `/api/docs` 获取完整 spec
 | `FLASK_SECRET_KEY` | Flask 密钥 | 随机生成 |
 | `AUTH_TOKEN` | API 认证 token（空则关闭） | 空 |
 | `LOG_LEVEL` | 日志级别 | INFO |
+| `CDP_PORT` | Chrome CDP 调试端口 | 9223 |
 | `PG_HOST` | PostgreSQL 主机 | localhost |
 | `PG_PORT` | PostgreSQL 端口 | 5432 |
 | `PG_DATABASE` | 数据库名 | kaoshibao |
@@ -130,18 +145,27 @@ API 文档通过 OpenAPI 3.0 规范提供，访问 `/api/docs` 获取完整 spec
 # 2. 创建虚拟环境
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium
 
 # 3. 配置环境变量
 cp .env.example .env  # 编辑 .env 填入数据库信息
 
-# 4. 启动服务（systemd）
-sudo cp kaoshibao.service /etc/systemd/system/
-sudo systemctl enable --now kaoshibao
+# 4. 安装 Linux 桌面组件（服务器无GUI时）
+apt install -y xvfb x11vnc novnc
+x11vnc -storepasswd <你的VNC密码> /etc/x11vnc.pass
 
-# 5. 配置 nginx 反向代理
+# 5. 启动服务（systemd）
+sudo cp kaoshibao.service xvfb.service x11vnc.service novnc.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xvfb x11vnc novnc kaoshibao
+
+# 6. 配置 nginx 反向代理
 sudo cp nginx_kaoshibao.conf /etc/nginx/sites-available/kaoshibao
 sudo ln -s /etc/nginx/sites-available/kaoshibao /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
+
+# 7. 通过 noVNC 远程登录考试宝
+#    打开 http://<服务器IP>:<端口>/vnc/vnc.html → 输入VNC密码 → 登录考试宝
 ```
 
 ### Docker 部署
@@ -173,11 +197,13 @@ GitHub Actions 自动运行：
 - **Pillow** — 图片预处理
 - **openpyxl** — Excel 生成
 - **psycopg2** — PostgreSQL 连接池
+- **Xvfb** — Linux 虚拟显示器（无 GUI 服务器运行 Chrome）
+- **x11vnc + noVNC** — Web 远程浏览器（通过浏览器操作 Chrome）
 - **nginx** — 反向代理
 
 ## 优化历程
 
-经过 8 轮共 66 项优化，综合评分从 6.5 提升至 9.4/10。详见 [OPTIMIZATION.md](OPTIMIZATION.md)。
+经过 9 轮共 69 项优化，综合评分从 6.5 提升至 9.4/10。详见 [OPTIMIZATION.md](OPTIMIZATION.md)。
 
 | 维度 | 初始 | 最终 |
 |------|------|------|

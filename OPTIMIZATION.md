@@ -900,3 +900,71 @@
 | MEDIUM | alembic数据库迁移 | CREATE IF NOT EXISTS | 需引入新工具 |
 | LOW | WebSocket替代轮询 | 实时推送 | 架构变更 |
 | LOW | i18n国际化 | 全中文硬编码 | 工作量大 |
+
+---
+
+## 第十轮：跨平台Linux支持 + noVNC远程浏览器（优化67-69）
+
+### 背景
+
+部署到腾讯云服务器（Ubuntu 24.04）后，爬取返回0题。排查发现：
+1. `scraper_core.py` 的 `_BROWSER_PROFILES` 全是Windows路径，`_detect_browser` 用 `tasklist`（Windows命令）
+2. 服务器上端口9222被其他项目（openclaw）的Chrome占用
+3. 服务器无桌面环境，Chrome无法以非headless模式运行（headless模式下考试宝检测拦截）
+
+### 优化67：scraper_core.py 跨平台Linux支持
+
+**目标**：让核心爬取模块在Linux服务器上能检测和启动Chrome
+
+**修改内容**：
+- `import sys` 添加平台检测
+- `_BROWSER_PROFILES` 添加Linux配置（Google Chrome / Chromium / Playwright Chromium路径）
+- `_detect_browser` 添加 `pgrep` 替代 `tasklist`（Linux进程检测）
+- `_start_browser_with_debug` 添加 `--no-sandbox --disable-gpu --disable-dev-shm-usage` 参数（Linux容器环境必需）
+- `ensure_chrome_debug` 添加 `pkill` 替代 `taskkill`（Linux进程终止）
+- `CDP_PORT` 改为从环境变量读取：`int(os.environ.get("CDP_PORT", "9223"))`
+
+**验证**：本地测试112/112 PASS
+
+### 优化68：Xvfb虚拟显示器 + systemd服务拆分
+
+**目标**：在无GUI的Linux服务器上运行Chrome（非headless模式）
+
+**修改内容**：
+- 新建 `xvfb.service`：独立Xvfb虚拟显示器服务（display :99，1280x1024x24分辨率）
+- `kaoshibao.service` 添加 `After=xvfb.service` 和 `Requires=xvfb.service` 依赖
+- `kaoshibao.service` 添加 `Environment=DISPLAY=:99` 环境变量
+- gunicorn启动参数添加 `--env DISPLAY=:99`
+- 移除 `ExecStartPre` 中的Xvfb启动（systemd不支持 `&` 后台语法，改用独立服务）
+
+**验证**：服务器上 `systemctl is-active xvfb kaoshibao` 均为 active
+
+### 优化69：noVNC远程浏览器（x11vnc + websockify + nginx代理）
+
+**目标**：让用户通过Web浏览器远程操作Chrome登录考试宝
+
+**修改内容**：
+- 新建 `x11vnc.service`：VNC服务器连接Xvfb display :99（端口5900，密码认证）
+- 新建 `novnc.service`：websockify WebSocket代理（端口6080，提供noVNC Web客户端）
+- `nginx_kaoshibao.conf` 添加 `/vnc/` location代理到websockify（支持WebSocket长连接）
+- `nginx_kaoshibao.conf` 添加 `proxy_buffering off` 和 `proxy_read_timeout 86400s`（VNC长连接）
+- `.env.example` 添加 `CDP_PORT=9223` 配置项
+
+**验证**：
+- 服务器 `curl http://127.0.0.1:9007/vnc/vnc.html` 返回200
+- Chrome在9223端口运行，CDP可连接
+- 考试宝首页在Chrome中加载成功
+
+### 第十轮评分
+
+| 维度 | 上轮 | 本轮 | 变化 | 说明 |
+|------|------|------|------|------|
+| 代码质量 | 9.0 | **9.0** | 持平 | 跨平台逻辑清晰 |
+| UX/UI | 9.5 | **9.5** | 持平 | noVNC为运维功能 |
+| 功能完整性 | 9.5 | **9.5** | 持平 | 跨平台扩展不改变功能 |
+| 测试覆盖 | 9.5 | **9.5** | 持平 | 112个测试，更新CDP_PORT和Xvfb测试 |
+| 安全性 | 9.0 | **9.0** | 持平 | VNC密码认证 |
+| 可维护性 | 9.5 | **9.5** | 持平 | systemd服务拆分清晰 |
+| 部署运维 | 9.5 | **9.5** | 持平 | 跨平台部署完善 |
+| 性能 | 9.5 | **9.5** | 持平 | 无性能影响 |
+| **综合** | **9.4** | **9.4** | **持平** | 跨平台能力补全 |
