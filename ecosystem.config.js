@@ -2,8 +2,8 @@ module.exports = {
   apps: [
     {
       name: 'kaoshibao',
-      script: 'venv/bin/python',
-      args: 'app.py',
+      script: 'venv/bin/gunicorn',
+      args: '--bind 0.0.0.0:5678 --workers 1 --timeout 120 app:app',
       cwd: '/home/user/kaoshibao',  // 修改为实际部署路径
       instances: 1,
       exec_mode: 'fork',

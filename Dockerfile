@@ -104,9 +104,9 @@ USER appuser
 # 暴露端口
 EXPOSE 5678
 
-# 健康检查
+# 健康检查（使用专用 /health 端点，返回 503 时标记不健康）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5678/api/chrome-status')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5678/health')" || exit 1
 
-# 启动命令
-CMD ["python", "app.py"]
+# 启动命令（生产环境用gunicorn，开发环境用python app.py）
+CMD ["gunicorn", "--bind", "0.0.0.0:5678", "--workers", "1", "--timeout", "120", "--access-logfile", "-", "app:app"]

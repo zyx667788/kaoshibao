@@ -3,16 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%234a90d9'/%3E%3Ctext x='32' y='44' font-size='40' text-anchor='middle' fill='white' font-family='sans-serif'%3E题%3C/text%3E%3C/svg%3E">
+    <link rel="manifest" id="manifest-link">
+    <script>document.getElementById('manifest-link').href = window.__p + '/manifest.json';</script>
+    <meta name="theme-color" content="#4a90d9">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="考试宝爬取">
     <title>考试宝题库爬取工具</title>
+    <script>window.__p = location.pathname.replace(/\/+$/, '');</script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; }
-        .container { max-width: 960px; margin: 0 auto; padding: 20px; }
-        .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
-        h1 { font-size: 24px; color: #1a1a1a; margin-bottom: 8px; }
-        .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
-        .input-group { display: flex; gap: 12px; margin-bottom: 12px; }
-        .input-group input { flex: 1; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; outline: none; transition: border-color 0.2s; }
+        :root {
+            --bg: #f0f2f5; --card-bg: #fff; --card-shadow: 0 2px 10px rgba(0,0,0,0.06);
+            --heading: #1a1a1a; --subtitle: #666; --input-bg: #fff; --input-border: #e0e0e0; --input-text: inherit;
+            --status-bg: #f9f9f9; --task-bg: #fafafa; --task-border: #e8e8e8; --task-title: #333;
+            --task-stats: #666; --task-stats-val: #333; --task-msg: #888;
+            --file-bg: #f9f9f9; --file-name: #333; --file-size: #999; --no-task: #bbb;
+            --tip-bg: #fffbe6; --tip-border: #ffe58f; --tip-color: #ad6800;
+            --quick-id-bg: #e6f7ff; --quick-id-border: #91d5ff; --quick-id-color: #1890ff;
+            --tab-color: #666; --toggle-bg: #fff; --text: #333;
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); min-height: 100vh; color: var(--text); }
+        .container { max-width: 980px; margin: 0 auto; padding: 16px; }
+        .card { background: var(--card-bg); border-radius: 10px; box-shadow: var(--card-shadow); padding: 18px; margin-bottom: 14px; }
+        h1 { font-size: 22px; color: var(--heading); margin-bottom: 6px; }
+        .subtitle { color: var(--subtitle); font-size: 13px; margin-bottom: 14px; }
+        .input-group { display: flex; gap: 10px; margin-bottom: 10px; }
+        .input-group input { flex: 1; padding: 12px 16px; border: 2px solid var(--input-border); border-radius: 8px; font-size: 16px; outline: none; transition: border-color 0.2s; background: var(--input-bg); color: var(--input-text); }
         .input-group input:focus { border-color: #4a90d9; }
         .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
         .btn-primary { background: #4a90d9; color: #fff; }
@@ -27,55 +44,66 @@
         .btn-sm { padding: 6px 12px; font-size: 13px; }
         .btn-download { background: #52c41a; color: #fff; font-size: 12px; padding: 4px 10px; text-decoration: none; display: inline-block; }
         .btn-download:hover { background: #73d13d; }
-        .chrome-status { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #f9f9f9; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+        .chrome-status { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--status-bg); border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
         .chrome-dot { width: 10px; height: 10px; border-radius: 50%; }
         .chrome-dot.online { background: #52c41a; box-shadow: 0 0 6px rgba(82,196,26,0.5); }
         .chrome-dot.offline { background: #ff4d4f; }
-        .quick-ids { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-        .quick-id { padding: 6px 12px; background: #e6f7ff; border: 1px solid #91d5ff; border-radius: 4px; cursor: pointer; font-size: 13px; color: #1890ff; }
+        .chrome-dot.offline.pulsing { animation: chromePulse 1s ease-in-out infinite; }
+        @keyframes chromePulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,77,79,0.5); } 50% { box-shadow: 0 0 0 6px rgba(255,77,79,0); } }
+        .chrome-status.disconnected { border: 2px solid #ff4d4f; background: #fff2f0; animation: chromeBorderPulse 2s ease-in-out infinite; }
+        @keyframes chromeBorderPulse { 0%,100% { border-color: #ff4d4f; } 50% { border-color: #ff7875; } }
+        .chrome-banner { display: none; background: #ff4d4f; color: #fff; padding: 8px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; font-weight: 600; text-align: center; }
+        .chrome-banner.show { display: block; }
+        .quick-ids { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+        .quick-id { padding: 6px 12px; background: var(--quick-id-bg); border: 1px solid var(--quick-id-border); border-radius: 4px; cursor: pointer; font-size: 13px; color: var(--quick-id-color); }
         .quick-id:hover { background: #bae7ff; }
-        .tip { background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; padding: 10px 14px; font-size: 13px; color: #ad6800; margin-bottom: 16px; }
-        .tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid #e8e8e8; }
-        .tab { padding: 8px 16px; cursor: pointer; font-size: 14px; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; user-select: none; }
+        .tip { background: var(--tip-bg); border: 1px solid var(--tip-border); border-radius: 6px; padding: 10px 14px; font-size: 13px; color: var(--tip-color); margin-bottom: 16px; }
+        .tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #e8e8e8; }
+        .tab { padding: 8px 16px; cursor: pointer; font-size: 14px; color: var(--tab-color); border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; user-select: none; }
         .tab.active { color: #4a90d9; border-bottom-color: #4a90d9; }
         .tab:hover { color: #4a90d9; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        textarea { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; resize: vertical; min-height: 80px; outline: none; font-family: inherit; }
+        textarea { width: 100%; padding: 12px; border: 2px solid var(--input-border); border-radius: 8px; font-size: 14px; resize: vertical; min-height: 80px; outline: none; font-family: inherit; background: var(--input-bg); color: var(--input-text); }
         textarea:focus { border-color: #4a90d9; }
 
-        .task-list { display: flex; flex-direction: column; gap: 16px; }
-        .task-card { border: 1px solid #e8e8e8; border-radius: 10px; padding: 16px; background: #fafafa; position: relative; }
+        .task-list { display: flex; flex-direction: column; gap: 10px; }
+        .task-card { border: 1px solid var(--task-border); border-radius: 8px; padding: 12px; background: var(--task-bg); position: relative; }
         .task-card.running { border-color: #4a90d9; background: #f0f7ff; }
         .task-card.done { border-color: #52c41a; background: #f6ffed; }
         .task-card.error { border-color: #ff4d4f; background: #fff2f0; }
-        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-        .task-title { font-size: 16px; font-weight: 600; color: #333; }
-        .task-actions { display: flex; gap: 8px; }
-        .phase-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: #fff; margin-left: 8px; }
+        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .task-title { font-size: 15px; font-weight: 600; color: var(--task-title); }
+        .task-actions { display: flex; gap: 6px; }
+        .phase-tag { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; color: #fff; margin-left: 6px; }
         .phase-collect { background: #4a90d9; }
         .phase-done { background: #52c41a; }
         .phase-error { background: #ff4d4f; }
-        .task-progress { margin-bottom: 10px; }
-        .progress-bar { height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; }
+        .task-progress { margin-bottom: 8px; }
+        .progress-bar { height: 5px; background: #e0e0e0; border-radius: 3px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, #4a90d9, #52c41a); border-radius: 3px; transition: width 0.3s; }
-        .task-stats { display: flex; gap: 16px; font-size: 13px; color: #666; flex-wrap: wrap; }
-        .task-stats span { color: #333; font-weight: 600; }
-        .task-message { font-size: 13px; color: #888; margin-top: 6px; }
-        .task-log { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 12px; max-height: 150px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; line-height: 1.5; margin-top: 10px; display: none; }
+        .task-stats { display: flex; gap: 14px; font-size: 12px; color: var(--task-stats); flex-wrap: wrap; }
+        .task-stats span { color: var(--task-stats-val); font-weight: 600; }
+        .task-message { font-size: 12px; color: var(--task-msg); margin-top: 4px; }
+        .task-log { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 10px; max-height: 140px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 11px; line-height: 1.5; margin-top: 8px; display: none; }
         .task-log.show { display: block; }
         .task-log .success { color: #4ec9b0; }
         .task-log .error { color: #f44747; }
         .task-log .info { color: #569cd6; }
-        .toggle-log { font-size: 12px; color: #4a90d9; cursor: pointer; margin-top: 6px; display: inline-block; }
+        .toggle-log { font-size: 11px; color: #4a90d9; cursor: pointer; margin-top: 4px; display: inline-block; }
         .toggle-log:hover { text-decoration: underline; }
-        .no-task { text-align: center; padding: 40px; color: #bbb; font-size: 15px; }
+        .no-task { text-align: center; padding: 32px 20px; color: var(--no-task); font-size: 14px; }
+        .skeleton { background: #f0f0f0; border-radius: 4px; animation: skeletonShimmer 1.5s ease-in-out infinite; }
+        @keyframes skeletonShimmer { 0% { background: #f0f0f0; } 50% { background: #e0e0e0; } 100% { background: #f0f0f0; } }
+        .skeleton-line { height: 14px; margin-bottom: 8px; }
+        .skeleton-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #f9f9f9; border-radius: 6px; margin-bottom: 6px; }
+        .skeleton-item .skeleton { flex: 1; margin-right: 12px; }
 
-        .files-section h2 { font-size: 16px; margin-bottom: 12px; }
-        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: #f9f9f9; border-radius: 6px; margin-bottom: 8px; }
-        .file-name { font-size: 14px; color: #333; word-break: break-all; }
-        .file-meta { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-        .file-size { font-size: 12px; color: #999; }
+        .files-section h2 { font-size: 15px; margin-bottom: 10px; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: var(--file-bg); border-radius: 6px; margin-bottom: 6px; }
+        .file-name { font-size: 13px; color: var(--file-name); word-break: break-all; }
+        .file-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+        .file-size { font-size: 11px; color: var(--file-size); }
         .file-del { color: #ff4d4f; cursor: pointer; font-size: 12px; opacity: 0.6; }
         .file-del:hover { opacity: 1; }
 
@@ -84,16 +112,128 @@
         .toast.success { background: #52c41a; }
         .toast.error { background: #ff4d4f; }
         .toast.info { background: #4a90d9; }
+
+        /* === 响应式：平板及以下 === */
+        @media (max-width: 768px) {
+            .container { padding: 12px; }
+            .card { padding: 14px; margin-bottom: 12px; border-radius: 10px; }
+            h1 { font-size: 20px; }
+            .subtitle { font-size: 13px; margin-bottom: 14px; }
+            .input-group { flex-direction: column; gap: 8px; }
+            .input-group input { padding: 10px 14px; font-size: 15px; }
+            .btn { padding: 10px 16px; font-size: 14px; min-height: 40px; }
+            .btn-sm { padding: 8px 12px; min-height: 34px; }
+            .btn-danger, .btn-ghost, .btn-download { padding: 6px 10px; font-size: 12px; }
+            .chrome-status { flex-wrap: wrap; padding: 8px 12px; font-size: 13px; }
+            .chrome-status #chromeBtn { margin-left: 0; width: 100%; margin-top: 8px; }
+            .quick-ids { gap: 6px; }
+            .quick-id { padding: 5px 10px; font-size: 12px; }
+            .tabs { margin-bottom: 12px; }
+            .tab { padding: 8px 12px; font-size: 13px; flex: 1; text-align: center; }
+            .task-card { padding: 12px; }
+            .task-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+            .task-actions { align-self: flex-end; }
+            .task-stats { gap: 10px; font-size: 12px; }
+            .task-log { max-height: 120px; font-size: 11px; padding: 8px; }
+            .file-item { flex-direction: column; align-items: flex-start; gap: 6px; }
+            .file-meta { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+            .file-name { font-size: 13px; }
+            .toast { top: 10px; right: 10px; left: 10px; max-width: none; font-size: 13px; padding: 10px 14px; }
+        }
+
+        /* === 响应式：手机 === */
+        @media (max-width: 480px) {
+            .container { padding: 8px; }
+            .card { padding: 12px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
+            h1 { font-size: 18px; }
+            .subtitle { font-size: 12px; margin-bottom: 10px; }
+            .btn { padding: 12px 16px; font-size: 14px; min-height: 44px; width: 100%; }
+            .btn-sm { width: auto; min-height: 36px; }
+            .input-group input { font-size: 16px; padding: 12px 14px; }
+            .task-title { font-size: 14px; }
+            .task-stats { font-size: 11px; gap: 8px; }
+            .task-stats div { white-space: nowrap; }
+            .quick-ids { flex-wrap: wrap; }
+            .quick-id { padding: 6px 10px; font-size: 11px; }
+            .progress-bar { height: 5px; }
+            .task-log { max-height: 100px; font-size: 10px; }
+            .file-meta { gap: 8px; }
+            .file-size { font-size: 11px; }
+        }
+
+        /* === 折叠屏：外屏窄、内屏宽 === */
+        @media (min-width: 481px) and (max-width: 600px) {
+            .container { padding: 10px; max-width: 100%; }
+            .card { padding: 12px; }
+            .input-group { flex-direction: row; gap: 8px; }
+            .input-group input { flex: 1; min-width: 0; }
+            .task-stats { gap: 12px; }
+        }
+
+        /* === 折叠屏横屏：短高度优化 === */
+        @media (max-height: 500px) and (orientation: landscape) {
+            .card { padding: 10px; margin-bottom: 8px; }
+            h1 { font-size: 16px; margin-bottom: 4px; }
+            .subtitle { margin-bottom: 8px; }
+            .chrome-status { padding: 6px 10px; margin-bottom: 8px; }
+            .task-log { max-height: 80px; }
+            .no-task { padding: 20px; }
+        }
+
+        /* === 大屏优化：减少空白 === */
+        @media (min-width: 1200px) {
+            .container { max-width: 1100px; }
+            .card { padding: 28px; }
+        }
+
+        /* === 触摸设备：增大点击区域 === */
+        @media (hover: none) and (pointer: coarse) {
+            .quick-id, .toggle-log, .file-del { min-height: 36px; display: inline-flex; align-items: center; }
+            .tab { min-height: 40px; display: flex; align-items: center; justify-content: center; }
+        }
+
+        /* === 暗色模式变量（系统跟随 + 手动） === */
+        @media (prefers-color-scheme: dark) {
+            body:not([data-theme="light"]) {
+                --bg: #141414; --card-bg: #1f1f1f; --card-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                --heading: #f0f0f0; --subtitle: #999; --input-bg: #2a2a2a; --input-border: #444; --input-text: #e0e0e0;
+                --status-bg: #262626; --task-bg: #262626; --task-border: #333; --task-title: #e0e0e0;
+                --task-stats: #aaa; --task-stats-val: #f0f0f0; --task-msg: #888;
+                --file-bg: #262626; --file-name: #e0e0e0; --file-size: #888; --no-task: #666;
+                --tip-bg: #3a3a1a; --tip-border: #6b6b2a; --tip-color: #d4b800;
+                --quick-id-bg: #1a3a5a; --quick-id-border: #2a5a8a; --quick-id-color: #69c0ff;
+                --tab-color: #999; --toggle-bg: #2a2a2a; --text: #e0e0e0;
+            }
+        }
+        body[data-theme="dark"] {
+            --bg: #141414; --card-bg: #1f1f1f; --card-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            --heading: #f0f0f0; --subtitle: #999; --input-bg: #2a2a2a; --input-border: #444; --input-text: #e0e0e0;
+            --status-bg: #262626; --task-bg: #262626; --task-border: #333; --task-title: #e0e0e0;
+            --task-stats: #aaa; --task-stats-val: #f0f0f0; --task-msg: #888;
+            --file-bg: #262626; --file-name: #e0e0e0; --file-size: #888; --no-task: #666;
+            --tip-bg: #3a3a1a; --tip-border: #6b6b2a; --tip-color: #d4b800;
+            --quick-id-bg: #1a3a5a; --quick-id-border: #2a5a8a; --quick-id-color: #69c0ff;
+            --tab-color: #999; --toggle-bg: #2a2a2a; --text: #e0e0e0;
+        }
+        body[data-theme="dark"] .chrome-status.disconnected { background: #3a1a1a; }
+        body[data-theme="dark"] .tab.active { color: #4a90d9; }
+
+        /* 主题切换按钮 */
+        .theme-toggle { position: fixed; top: 14px; right: 14px; width: 36px; height: 36px; border-radius: 50%; border: none; background: var(--toggle-bg); box-shadow: 0 2px 8px rgba(0,0,0,0.15); cursor: pointer; font-size: 18px; z-index: 1000; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        .theme-toggle:hover { transform: scale(1.08); }
     </style>
 </head>
 <body>
-    <div id="toast" class="toast"></div>
+    <noscript><div style="font-family:sans-serif;text-align:center;padding:50px;color:#c00"><h2>需要 JavaScript 支持</h2><p>请启用 JavaScript 后刷新页面</p></div></noscript>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换主题" aria-label="切换深色/浅色主题">🌙</button>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <div class="container">
         <div class="card">
             <h1>考试宝题库爬取工具</h1>
             <p class="subtitle">通过Chrome已登录会话爬取，支持5个任务并行，背题模式一次收集题目+答案</p>
 
+            <div class="chrome-banner" id="chromeBanner" role="alert">⚠ Chrome未连接，爬取任务将无法运行！请点击"启动Chrome"。</div>
             <div class="chrome-status" id="chromeStatus">
                 <div class="chrome-dot offline" id="chromeDot"></div>
                 <span id="chromeText">检查Chrome状态...</span>
@@ -121,14 +261,15 @@
                 <div class="quick-id" onclick="setId('13573440')">13573440</div>
             </div>
 
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab('single')">单个任务</div>
-                <div class="tab" onclick="switchTab('batch')">批量导入</div>
+            <div class="tabs" role="tablist">
+                <div class="tab active" onclick="switchTab('single')" role="tab" aria-selected="true" tabindex="0">单个任务</div>
+                <div class="tab" onclick="switchTab('batch')" role="tab" aria-selected="false" tabindex="0">批量导入</div>
+                <div class="tab" onclick="switchTab('history')" role="tab" aria-selected="false" tabindex="0">历史</div>
             </div>
 
-            <div id="tab-single" class="tab-content active">
+            <div id="tab-single" class="tab-content active" role="tabpanel">
                 <div class="input-group">
-                    <input type="text" id="paperId" placeholder="输入题库ID（从URL获取，如 13573440）" onkeydown="if(event.key==='Enter')startTask()" />
+                    <input type="text" id="paperId" placeholder="输入题库ID（从URL获取，如 13573440）" aria-label="题库ID" onkeydown="if(event.key==='Enter')startTask()" />
                     <button class="btn btn-primary" id="startBtn" onclick="startTask()">添加任务</button>
                 </div>
                 <div style="margin-top:12px;padding:12px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:8px;">
@@ -155,40 +296,157 @@
                 </div>
             </div>
 
-            <div id="tab-batch" class="tab-content">
-                <textarea id="batchIds" placeholder="每行一个题库ID或URL，例如：&#10;13573440&#10;17940685&#10;https://www.kaoshibao.com/ti/12345/"></textarea>
+            <div id="tab-batch" class="tab-content" role="tabpanel">
+                <textarea id="batchIds" aria-label="批量题库ID" placeholder="每行一个题库ID或URL，例如：&#10;13573440&#10;17940685&#10;https://www.kaoshibao.com/ti/12345/"></textarea>
                 <div style="margin-top:8px;text-align:right;">
                     <button class="btn btn-primary" id="batchBtn" onclick="batchStart()">批量添加</button>
                 </div>
             </div>
+
+            <div id="tab-history" class="tab-content" role="tabpanel">
+                <div id="historyList" style="min-height:60px;" aria-label="爬取历史列表"></div>
+            </div>
         </div>
 
         <div class="card">
-            <h2 style="font-size:16px;margin-bottom:16px;">任务列表 <span id="taskCount" style="color:#999;font-weight:normal;font-size:13px;"></span></h2>
-            <div class="task-list" id="taskList">
+            <h2 style="font-size:15px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">任务列表 <span id="taskCount" style="color:#999;font-weight:normal;font-size:12px;"></span>
+                <select id="taskSort" onchange="renderTasks(window._lastTaskList || [])" style="margin-left:auto;padding:3px 8px;border:1px solid #e0e0e0;border-radius:4px;font-size:12px;outline:none;" aria-label="任务排序">
+                    <option value="status">按状态</option>
+                    <option value="time">按时间</option>
+                    <option value="progress">按进度</option>
+                </select>
+            </h2>
+            <div class="task-list" id="taskList" role="list" aria-label="任务列表">
                 <div class="no-task">暂无任务，输入题库ID开始爬取</div>
             </div>
         </div>
 
         <div class="card files-section">
-            <h2>已生成文件</h2>
-            <div id="fileList">加载中...</div>
+            <h2>已生成文件 <span id="fileCount" style="color:#999;font-weight:normal;font-size:12px;"></span></h2>
+            <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap;">
+                <input type="text" id="fileSearch" placeholder="搜索文件名..." aria-label="搜索文件" oninput="fileVisibleCount=50;renderFileList()" style="flex:1;min-width:120px;padding:6px 10px;border:1px solid #e0e0e0;border-radius:6px;font-size:13px;outline:none;">
+                <select id="fileSort" onchange="fileVisibleCount=50;renderFileList()" style="padding:4px 8px;border:1px solid #e0e0e0;border-radius:4px;font-size:12px;outline:none;" aria-label="文件排序">
+                    <option value="time-desc">时间↓</option>
+                    <option value="time-asc">时间↑</option>
+                    <option value="name-asc">名称↑</option>
+                    <option value="name-desc">名称↓</option>
+                    <option value="size-desc">大小↓</option>
+                    <option value="size-asc">大小↑</option>
+                </select>
+                <label style="font-size:12px;color:#666;cursor:pointer;"><input type="checkbox" id="fileSelectAll" onclick="toggleSelectAllFiles()" style="margin-right:4px;">全选</label>
+                <button class="btn btn-danger btn-sm" id="batchDelBtn" onclick="batchDeleteFiles()" style="display:none;">批量删除</button>
+            </div>
+            <div id="fileList"></div>
         </div>
     </div>
 
     <script>
-        var polling = null;
+        let polling = null;
+
+        window.addEventListener('error', function(e) {
+            console.error('页面错误:', e.message);
+        });
+        window.addEventListener('unhandledrejection', function(e) {
+            console.error('未处理 Promise:', e.reason);
+        });
+        window.addEventListener('online', function() { showToast('网络已恢复', 'success'); });
+        window.addEventListener('offline', function() { showToast('网络已断开', 'error'); });
+
+        async function apiFetch(url, options) {
+            try {
+                let res = await fetch(url, options);
+                let contentType = res.headers.get('content-type') || '';
+                if (contentType.indexOf('application/json') >= 0) {
+                    let data = await res.json();
+                    if (!res.ok && data && data.error) {
+                        showToast(data.error, 'error');
+                    }
+                    return { ok: res.ok, status: res.status, data: data };
+                }
+                return { ok: res.ok, status: res.status, data: null };
+            } catch (e) {
+                showToast('请求失败: 服务未连接', 'error');
+                return { ok: false, status: 0, data: null, error: e };
+            }
+        }
+
+        (function initTheme() {
+            let saved = localStorage.getItem('theme');
+            if (saved === 'dark' || saved === 'light') {
+                document.body.setAttribute('data-theme', saved);
+            }
+            updateThemeIcon();
+        })();
+
+        function getCurrentTheme() {
+            let explicit = document.body.getAttribute('data-theme');
+            if (explicit) return explicit;
+            return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        function updateThemeIcon() {
+            let btn = document.getElementById('themeToggle');
+            if (btn) btn.textContent = getCurrentTheme() === 'dark' ? '☀️' : '🌙';
+        }
+
+        function toggleTheme() {
+            let current = getCurrentTheme();
+            let next = current === 'dark' ? 'light' : 'dark';
+            document.body.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            updateThemeIcon();
+        }
+
+        let _configKeys = ['readMode', 'totalQ', 'workerCount', 'taskSort', 'fileSort'];
+
+        function loadConfig() {
+            _configKeys.forEach(function(key) {
+                let el = document.getElementById(key);
+                if (!el) return;
+                let saved = localStorage.getItem('cfg_' + key);
+                if (saved !== null) {
+                    if (el.type === 'checkbox') el.checked = saved === 'true';
+                    else el.value = saved;
+                }
+            });
+            let parallelSaved = localStorage.getItem('cfg_parallelMode');
+            if (parallelSaved !== null) document.getElementById('parallelMode').checked = parallelSaved === 'true';
+        }
+
+        function saveConfig() {
+            _configKeys.forEach(function(key) {
+                let el = document.getElementById(key);
+                if (!el) return;
+                localStorage.setItem('cfg_' + key, el.type === 'checkbox' ? el.checked : el.value);
+            });
+            localStorage.setItem('cfg_parallelMode', document.getElementById('parallelMode').checked);
+        }
+
+        function bindConfigChange() {
+            _configKeys.concat(['parallelMode']).forEach(function(key) {
+                let el = document.getElementById(key);
+                if (el) el.addEventListener('change', saveConfig);
+            });
+        }
+
+        function skeletonItems(n) {
+            let html = '';
+            for (let i = 0; i < n; i++) {
+                html += '<div class="skeleton-item"><div class="skeleton skeleton-line" style="width:' + (50 + Math.random() * 40) + '%;"></div><div class="skeleton skeleton-line" style="width:60px;flex:none;"></div></div>';
+            }
+            return html;
+        }
 
         function esc(str) {
             if (!str) return '';
-            var div = document.createElement('div');
+            let div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
         }
 
         function showToast(msg, type) {
             type = type || 'info';
-            var el = document.getElementById('toast');
+            let el = document.getElementById('toast');
             el.textContent = msg;
             el.className = 'toast ' + type + ' show';
             clearTimeout(el._timer);
@@ -200,58 +458,96 @@
         }
 
         function switchTab(tab) {
-            document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+            document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
             document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
-            if (tab === 'single') {
-                document.querySelectorAll('.tab')[0].classList.add('active');
-                document.getElementById('tab-single').classList.add('active');
-            } else {
-                document.querySelectorAll('.tab')[1].classList.add('active');
-                document.getElementById('tab-batch').classList.add('active');
+            let idx = {'single': 0, 'batch': 1, 'history': 2}[tab] || 0;
+            let tabEl = document.querySelectorAll('.tab')[idx];
+            tabEl.classList.add('active');
+            tabEl.setAttribute('aria-selected', 'true');
+            document.getElementById('tab-' + tab).classList.add('active');
+            if (tab === 'history') loadHistory();
+        }
+
+        async function loadHistory() {
+            let el = document.getElementById('historyList');
+            el.innerHTML = skeletonItems(3);
+            try {
+                let res = await fetch(window.__p+'/api/history');
+                let list = await res.json();
+                if (!list || list.length === 0) {
+                    el.innerHTML = '<div style="color:#999;font-size:13px;text-align:center;padding:20px;">暂无爬取历史</div>';
+                    return;
+                }
+                el.innerHTML = list.map(function(h) {
+                    let date = new Date(h.mtime * 1000).toLocaleString('zh-CN');
+                    let rate = h.count > 0 ? Math.round(h.has_answer / h.count * 100) : 0;
+                    return '<div class="file-item" style="flex-wrap:wrap;">' +
+                        '<div style="flex:1;min-width:120px;">' +
+                            '<div style="font-size:14px;color:#333;font-weight:600;">题库 ' + esc(h.paper_id) + (h.mode_suffix ? ' <span style="color:#1890ff;font-size:11px;">[' + esc(h.mode_suffix.replace('_','').toUpperCase()) + ']</span>' : '') + '</div>' +
+                            '<div style="font-size:11px;color:#999;margin-top:2px;">' + date + ' · ' + h.count + '题 · 答案率' + rate + '%</div>' +
+                        '</div>' +
+                        '<div class="file-meta">' +
+                            '<button class="btn btn-ghost btn-sm" onclick="setId(\'' + esc(h.paper_id) + '\');switchTab(\'single\');">继续爬</button>' +
+                            '<a class="btn btn-download" href="/api/export/' + encodeURIComponent(h.paper_id) + '?format=xlsx" download>Excel</a>' +
+                            '<a class="btn btn-download" href="/api/export/' + encodeURIComponent(h.paper_id) + '?format=csv" download style="background:#fa8c16;">CSV</a>' +
+                            '<a class="btn btn-download" href="/api/export/' + encodeURIComponent(h.paper_id) + '?format=json" download style="background:#722ed1;">JSON</a>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+            } catch (e) {
+                el.innerHTML = '<div style="color:#ff4d4f;font-size:13px;">加载失败</div>';
             }
         }
 
         function formatElapsed(seconds) {
             if (!seconds || seconds <= 0) return '';
-            var m = Math.floor(seconds / 60);
-            var s = seconds % 60;
+            let m = Math.floor(seconds / 60);
+            let s = seconds % 60;
             if (m > 0) return m + '分' + s + '秒';
             return s + '秒';
         }
 
         async function checkChrome() {
             try {
-                var res = await fetch('/api/chrome-status');
-                var data = await res.json();
-                var dot = document.getElementById('chromeDot');
-                var text = document.getElementById('chromeText');
-                var btn = document.getElementById('chromeBtn');
-                var tip = document.getElementById('tipArea');
+                let res = await fetch(window.__p+'/api/chrome-status');
+                let data = await res.json();
+                let dot = document.getElementById('chromeDot');
+                let text = document.getElementById('chromeText');
+                let btn = document.getElementById('chromeBtn');
+                let tip = document.getElementById('tipArea');
+                let status = document.getElementById('chromeStatus');
+                let banner = document.getElementById('chromeBanner');
                 if (data.online) {
                     dot.className = 'chrome-dot online';
                     text.textContent = 'Chrome已连接（调试模式）';
                     btn.textContent = '已连接';
                     btn.disabled = true;
                     tip.textContent = 'Chrome已就绪，可以直接输入题库ID开始爬取。';
+                    if (status) status.classList.remove('disconnected');
+                    if (banner) banner.classList.remove('show');
                 } else {
-                    dot.className = 'chrome-dot offline';
+                    dot.className = 'chrome-dot offline pulsing';
                     text.textContent = 'Chrome未就绪 - 需要以调试模式启动';
                     btn.textContent = '启动Chrome';
                     btn.disabled = false;
                     tip.textContent = '点击"启动Chrome"会以调试模式重启Chrome（登录态自动保留），并自动打开考试宝网站。';
+                    if (status) status.classList.add('disconnected');
+                    if (banner) banner.classList.add('show');
                 }
             } catch (e) {
                 document.getElementById('chromeText').textContent = '服务未连接';
+                let banner = document.getElementById('chromeBanner');
+                if (banner) { banner.textContent = '⚠ 无法连接服务器，请检查服务是否运行。'; banner.classList.add('show'); }
             }
         }
 
         async function startChrome() {
-            var btn = document.getElementById('chromeBtn');
+            let btn = document.getElementById('chromeBtn');
             btn.disabled = true;
             btn.textContent = '启动中...';
             try {
-                var res = await fetch('/api/chrome-start', { method: 'POST' });
-                var data = await res.json();
+                let res = await fetch(window.__p+'/api/chrome-start', { method: 'POST' });
+                let data = await res.json();
                 if (data.ok) {
                     if (data.logged_in === true) {
                         showToast('Chrome已就绪，考试宝已登录', 'success');
@@ -274,19 +570,19 @@
         }
 
         async function startTask() {
-            var paperId = document.getElementById('paperId').value.trim();
+            let paperId = document.getElementById('paperId').value.trim();
             if (!paperId) { showToast('请输入题库ID', 'error'); return; }
-            var mode = document.getElementById('readMode').value;
-            var btn = document.getElementById('startBtn');
+            let mode = document.getElementById('readMode').value;
+            let btn = document.getElementById('startBtn');
             btn.disabled = true;
             btn.textContent = '启动中...';
             try {
-                var res = await fetch('/api/start', {
+                let res = await fetch(window.__p+'/api/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paper_id: paperId, mode: mode })
                 });
-                var data = await res.json();
+                let data = await res.json();
                 if (data.error) { showToast(data.error, 'error'); return; }
                 document.getElementById('paperId').value = '';
                 if (data.mode === 'race') {
@@ -304,25 +600,25 @@
         }
 
         async function batchStart() {
-            var raw = document.getElementById('batchIds').value.trim();
+            let raw = document.getElementById('batchIds').value.trim();
             if (!raw) { showToast('请输入题库ID', 'error'); return; }
-            var ids = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+            let ids = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
             if (ids.length === 0) { showToast('请输入题库ID', 'error'); return; }
             if (ids.length > 10) { showToast('单次最多10个', 'error'); return; }
 
-            var btn = document.getElementById('batchBtn');
+            let btn = document.getElementById('batchBtn');
             btn.disabled = true;
             btn.textContent = '启动中...';
             try {
-                var res = await fetch('/api/batch-start', {
+                let res = await fetch(window.__p+'/api/batch-start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ids: ids })
                 });
-                var data = await res.json();
+                let data = await res.json();
                 if (data.results) {
-                    var okCount = data.results.filter(function(r) { return r.ok; }).length;
-                    var failCount = data.results.length - okCount;
+                    let okCount = data.results.filter(function(r) { return r.ok; }).length;
+                    let failCount = data.results.length - okCount;
                     if (okCount > 0) showToast(okCount + '个任务已启动' + (failCount > 0 ? '，' + failCount + '个失败' : ''), 'success');
                     else showToast('全部失败', 'error');
                     document.getElementById('batchIds').value = '';
@@ -338,24 +634,24 @@
             }
         }
 
-        var parallelPaperId = '';
-        var parallelWorkers = 0;
+        let parallelPaperId = '';
+        let parallelWorkers = 0;
 
         async function startParallel() {
-            var paperId = document.getElementById('paperId').value.trim();
+            let paperId = document.getElementById('paperId').value.trim();
             if (!paperId) { showToast('请输入题库ID', 'error'); return; }
-            var totalQ = parseInt(document.getElementById('totalQ').value) || 702;
-            var workers = parseInt(document.getElementById('workerCount').value) || 4;
-            var btn = document.getElementById('parallelBtn');
+            let totalQ = parseInt(document.getElementById('totalQ').value) || 702;
+            let workers = parseInt(document.getElementById('workerCount').value) || 4;
+            let btn = document.getElementById('parallelBtn');
             btn.disabled = true;
             btn.textContent = '启动中...';
             try {
-                var res = await fetch('/api/start-parallel', {
+                let res = await fetch(window.__p+'/api/start-parallel', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paper_id: paperId, total_questions: totalQ, workers: workers })
                 });
-                var data = await res.json();
+                let data = await res.json();
                 if (data.ok) {
                     parallelPaperId = data.paper_id;
                     parallelWorkers = data.workers;
@@ -376,16 +672,16 @@
 
         async function mergeSegments() {
             if (!parallelPaperId) { showToast('没有待合并的分段', 'error'); return; }
-            var btn = document.getElementById('mergeBtn');
+            let btn = document.getElementById('mergeBtn');
             btn.disabled = true;
             btn.textContent = '合并中...';
             try {
-                var res = await fetch('/api/merge-segments', {
+                let res = await fetch(window.__p+'/api/merge-segments', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paper_id: parallelPaperId, workers: parallelWorkers })
                 });
-                var data = await res.json();
+                let data = await res.json();
                 if (data.ok) {
                     showToast('合并完成! ' + data.total + '题, ' + data.has_answer + '道有答案', 'success');
                     parallelPaperId = '';
@@ -404,40 +700,115 @@
         }
 
         async function stopTask(taskId) {
-            try { await fetch('/api/stop/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
+            try { await fetch(window.__p+'/api/stop/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
+        }
+
+        async function resumeTask(paperId, isSegment) {
+            if (isSegment) { showToast('分段任务请使用分段爬取重新启动', 'info'); return; }
+            let mode = document.getElementById('readMode').value;
+            try {
+                let res = await fetch(window.__p+'/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paper_id: paperId, mode: mode })
+                });
+                let data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                showToast('已从断点继续题库 ' + paperId, 'success');
+                startPolling();
+            } catch (e) {
+                showToast('继续失败: 服务未连接', 'error');
+            }
+        }
+
+        async function retryTask(paperId, isSegment) {
+            if (isSegment) { showToast('分段任务请使用分段爬取重新启动', 'info'); return; }
+            if (!confirm('重试将清除题库 ' + paperId + ' 的已有进度，确定？')) return;
+            try {
+                await fetch(window.__p+'/api/clear-progress/' + encodeURIComponent(paperId), { method: 'POST' });
+                let mode = document.getElementById('readMode').value;
+                let res = await fetch(window.__p+'/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paper_id: paperId, mode: mode })
+                });
+                let data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                showToast('已重新开始题库 ' + paperId, 'success');
+                startPolling();
+            } catch (e) {
+                showToast('重试失败: 服务未连接', 'error');
+            }
         }
 
         async function removeTask(taskId) {
-            try { await fetch('/api/remove/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
+            try { await fetch(window.__p+'/api/remove/' + encodeURIComponent(taskId), { method: 'POST' }); } catch (e) {}
         }
 
         function toggleLog(taskId) {
-            var el = document.getElementById('log-' + taskId);
+            let el = document.getElementById('log-' + taskId);
             if (el) el.classList.toggle('show');
         }
 
+        function exportLog(taskId, paperId) {
+            let el = document.getElementById('log-' + taskId);
+            if (!el) return;
+            let lines = [];
+            el.querySelectorAll('div').forEach(function(d) { lines.push(d.textContent); });
+            if (lines.length === 0) { showToast('无日志可导出', 'info'); return; }
+            let content = '题库 ' + paperId + ' 任务日志\n导出时间: ' + new Date().toLocaleString('zh-CN') + '\n共 ' + lines.length + ' 条\n' + '='.repeat(40) + '\n\n' + lines.join('\n');
+            let blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            let url = URL.createObjectURL(blob);
+            let a = document.createElement('a');
+            a.href = url;
+            a.download = '任务日志_' + paperId + '_' + taskId + '.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        let pollErrorCount = 0;
+        let pageVisible = true;
+
+        document.addEventListener('visibilitychange', function() {
+            pageVisible = !document.hidden;
+        });
+
         function startPolling() {
             if (polling) return;
-            polling = setInterval(async function() {
-                try {
-                    var res = await fetch('/api/tasks');
-                    var taskList = await res.json();
-                    renderTasks(taskList);
-                    var anyRunning = taskList.some(function(t) { return t.running; });
-                    if (!anyRunning) {
-                        clearInterval(polling);
-                        polling = null;
-                        loadFiles();
+            function scheduleNext(delay) {
+                polling = setTimeout(async function() {
+                    if (!pageVisible) { scheduleNext(2000); return; }
+                    try {
+                        let res = await fetch(window.__p+'/api/tasks');
+                        let taskList = await res.json();
+                        pollErrorCount = 0;
+                        renderTasks(taskList);
+                        let runningTasks = taskList.filter(function(t) { return t.running; });
+                        if (runningTasks.length === 0) {
+                            polling = null;
+                            loadFiles();
+                            return;
+                        }
+                        checkChrome();
+                        let nextDelay = runningTasks.length >= 3 ? 800 : (runningTasks.length >= 1 ? 1200 : 2000);
+                        scheduleNext(nextDelay);
+                    } catch (e) {
+                        pollErrorCount++;
+                        let backoff = Math.min(1000 * Math.pow(2, pollErrorCount), 10000);
+                        scheduleNext(backoff);
                     }
-                    checkChrome();
-                } catch (e) {}
-            }, 1500);
+                }, delay);
+            }
+            scheduleNext(100);
         }
 
         function renderTasks(taskList) {
-            var container = document.getElementById('taskList');
-            var countEl = document.getElementById('taskCount');
-            var running = taskList.filter(function(t) { return t.running; }).length;
+            window._lastTaskList = taskList;
+            let container = document.getElementById('taskList');
+            let countEl = document.getElementById('taskCount');
+            let running = taskList.filter(function(t) { return t.running; }).length;
             countEl.textContent = taskList.length > 0 ? '(' + running + ' 运行中 / ' + taskList.length + ' 总计)' : '';
 
             if (taskList.length === 0) {
@@ -445,95 +816,218 @@
                 return;
             }
 
-            container.innerHTML = taskList.map(function(t) {
-                var cls = t.running ? 'running' : (t.phase === 'done' ? 'done' : (t.phase === 'error' ? 'error' : ''));
-                var phaseMap = {
+            let sortMode = (document.getElementById('taskSort') || {}).value || 'status';
+            let sorted = taskList.slice();
+            let statusOrder = {'init': 0, 'collect': 1, 'error': 2, 'done': 3};
+            sorted.sort(function(a, b) {
+                if (sortMode === 'status') {
+                    let ar = a.running ? -1 : 0, br = b.running ? -1 : 0;
+                    if (ar !== br) return ar - br;
+                    return (statusOrder[a.phase] || 0) - (statusOrder[b.phase] || 0);
+                } else if (sortMode === 'time') {
+                    return (b.created_at || 0) - (a.created_at || 0);
+                } else if (sortMode === 'progress') {
+                    let ap = a.total > 0 ? a.progress / a.total : 0;
+                    let bp = b.total > 0 ? b.progress / b.total : 0;
+                    return bp - ap;
+                }
+                return 0;
+            });
+
+            container.innerHTML = sorted.map(function(t) {
+                let cls = t.running ? 'running' : (t.phase === 'done' ? 'done' : (t.phase === 'error' ? 'error' : ''));
+                let phaseMap = {
                     'collect': ['收集中', 'phase-collect'],
                     'done': ['完成', 'phase-done'],
                     'error': ['错误', 'phase-error'],
                 };
-                var phaseInfo = phaseMap[t.phase] || ['准备中', ''];
-                var phaseText = phaseInfo[0];
-                var phaseCls = phaseInfo[1];
+                let phaseInfo = phaseMap[t.phase] || ['准备中', ''];
+                let phaseText = phaseInfo[0];
+                let phaseCls = phaseInfo[1];
 
-                var pct = t.total > 0 ? Math.round((t.progress / t.total) * 100) : (t.phase === 'done' ? 100 : 0);
-                var elapsed = t.elapsed ? formatElapsed(t.elapsed) : '';
+                let pct = t.total > 0 ? Math.round((t.progress / t.total) * 100) : (t.phase === 'done' ? 100 : 0);
+                let elapsed = t.elapsed ? formatElapsed(t.elapsed) : '';
+                let answerRate = t.total > 0 ? Math.round((t.has_answer / t.total) * 100) : 0;
+                let eta = '';
+                if (t.running && t.progress > 0 && t.elapsed > 0 && t.total > 0 && t.progress < t.total) {
+                    let speed = t.progress / t.elapsed;
+                    if (speed > 0) eta = formatElapsed(Math.round((t.total - t.progress) / speed));
+                }
+                let progressLabel = pct + '%';
+                if (t.running && t.total > 0) progressLabel = t.progress + '/' + t.total + ' (' + pct + '%)';
 
-                var logs = (t.log || []).map(function(line) {
-                    var logCls = '';
+                let logs = (t.log || []).map(function(line) {
+                    let logCls = '';
                     if (line.indexOf('成功') >= 0 || line.indexOf('完成') >= 0 || line.indexOf('就绪') >= 0 || line.indexOf('已连接') >= 0) logCls = 'success';
                     else if (line.indexOf('错误') >= 0 || line.indexOf('超时') >= 0 || line.indexOf('失败') >= 0) logCls = 'error';
                     else if (line.indexOf('开始') >= 0 || line.indexOf('开启') >= 0 || line.indexOf('连接') >= 0) logCls = 'info';
                     return '<div class="' + logCls + '">' + esc(line) + '</div>';
                 }).join('');
 
-                var actions = '';
+                let actions = '';
                 if (t.running) {
-                    actions = '<button class="btn btn-danger" onclick="stopTask(\'' + esc(t.task_id) + '\')">停止</button>';
+                    actions = '<button class="btn btn-danger" onclick="stopTask(\'' + esc(t.task_id) + '\')">暂停</button>';
+                } else if (t.phase === 'error') {
+                    actions = '<button class="btn btn-ghost" onclick="retryTask(\'' + esc(t.paper_id) + '\',' + esc(t.segment_id >= 0 ? 'true' : 'false') + ')">重试</button>' +
+                              '<button class="btn btn-ghost" onclick="resumeTask(\'' + esc(t.paper_id) + '\',' + esc(t.segment_id >= 0 ? 'true' : 'false') + ')">继续</button>' +
+                              '<button class="btn btn-ghost" onclick="removeTask(\'' + esc(t.task_id) + '\')">移除</button>';
+                } else if (t.phase === 'done') {
+                    actions = '<button class="btn btn-ghost" onclick="resumeTask(\'' + esc(t.paper_id) + '\',' + esc(t.segment_id >= 0 ? 'true' : 'false') + ')">继续</button>' +
+                              '<button class="btn btn-ghost" onclick="removeTask(\'' + esc(t.task_id) + '\')">移除</button>';
                 } else {
                     actions = '<button class="btn btn-ghost" onclick="removeTask(\'' + esc(t.task_id) + '\')">移除</button>';
                 }
 
-                return '<div class="task-card ' + cls + '">' +
+                return '<div class="task-card ' + cls + '" role="listitem">' +
                     '<div class="task-header">' +
                         '<div>' +
-                            '<span class="task-title">题库 ' + esc(t.paper_id) + (t.segment_id >= 0 ? ' <span style="color:#52c41a;font-size:12px;">分段' + (t.segment_id+1) + '</span>' : '') + (t.mode && t.mode !== 'ocr' ? ' <span style="color:#1890ff;font-size:12px;">[' + esc(t.mode.toUpperCase()) + ']</span>' : '') + '</span>' +
+                            '<span class="task-title">题库 ' + esc(t.paper_id) + (t.segment_id >= 0 ? ' <span style="color:#52c41a;font-size:11px;">分段' + (t.segment_id+1) + '</span>' : '') + (t.mode && t.mode !== 'ocr' ? ' <span style="color:#1890ff;font-size:11px;">[' + esc(t.mode.toUpperCase()) + ']</span>' : '') + '</span>' +
                             '<span class="phase-tag ' + phaseCls + '">' + esc(phaseText) + '</span>' +
                         '</div>' +
                         '<div class="task-actions">' + actions + '</div>' +
                     '</div>' +
-                    '<div class="task-progress">' +
-                        '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+                    '<div class="task-progress" style="display:flex;align-items:center;gap:8px;">' +
+                        '<div class="progress-bar" style="flex:1;" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+                        '<span style="font-size:11px;color:#666;min-width:70px;text-align:right;">' + esc(progressLabel) + '</span>' +
                     '</div>' +
                     '<div class="task-stats">' +
-                        '<div>总题数: <span>' + t.total + '</span></div>' +
-                        '<div>有答案: <span>' + t.has_answer + '</span></div>' +
-                        '<div>进度: <span>' + t.progress + '</span></div>' +
+                        '<div>答案: <span>' + t.has_answer + '/' + t.total + '</span> (' + answerRate + '%)</div>' +
                         (elapsed ? '<div>耗时: <span>' + esc(elapsed) + '</span></div>' : '') +
+                        (eta ? '<div>预计剩余: <span>' + esc(eta) + '</span></div>' : '') +
                     '</div>' +
                     (t.message ? '<div class="task-message">' + esc(t.message) + '</div>' : '') +
-                    '<div class="toggle-log" onclick="toggleLog(\'' + esc(t.task_id) + '\')">展开日志</div>' +
+                    '<div style="margin-top:4px;">' +
+                        '<span class="toggle-log" onclick="toggleLog(\'' + esc(t.task_id) + '\')">展开日志</span>' +
+                        (t.log && t.log.length > 0 ? ' <span class="toggle-log" onclick="exportLog(\'' + esc(t.task_id) + '\',\'' + esc(t.paper_id) + '\')">导出日志</span>' : '') +
+                    '</div>' +
                     '<div class="task-log" id="log-' + esc(t.task_id) + '">' + logs + '</div>' +
                 '</div>';
             }).join('');
 
             taskList.forEach(function(t) {
-                var logEl = document.getElementById('log-' + t.task_id);
+                let logEl = document.getElementById('log-' + t.task_id);
                 if (logEl) logEl.scrollTop = logEl.scrollHeight;
             });
         }
 
+        let allFiles = [];
+        let selectedFiles = new Set();
+        let fileVisibleCount = 50;
+
         async function loadFiles() {
+            document.getElementById('fileList').innerHTML = skeletonItems(3);
             try {
-                var res = await fetch('/api/files');
-                var files = await res.json();
-                var div = document.getElementById('fileList');
-                if (files.length === 0) {
-                    div.innerHTML = '<div style="color:#999;font-size:14px;">暂无文件</div>';
-                    return;
-                }
-                div.innerHTML = files.map(function(f) {
-                    var size = f.size > 1024*1024
-                        ? (f.size / 1024 / 1024).toFixed(1) + ' MB'
-                        : (f.size / 1024).toFixed(1) + ' KB';
-                    var date = new Date(f.time * 1000).toLocaleString('zh-CN');
-                    return '<div class="file-item">' +
-                        '<span class="file-name">' + esc(f.name) + '</span>' +
-                        '<div class="file-meta">' +
-                            '<span class="file-size">' + size + '</span>' +
-                            '<span class="file-size">' + date + '</span>' +
-                            '<a class="btn btn-download" href="/api/download/' + encodeURIComponent(f.name) + '" download>下载</a>' +
-                            '<span class="file-del" onclick="deleteFile(\'' + esc(f.name) + '\')">删除</span>' +
-                        '</div>' +
-                    '</div>';
-                }).join('');
+                let res = await fetch(window.__p+'/api/files');
+                allFiles = await res.json();
+                selectedFiles.clear();
+                renderFileList();
             } catch (e) {}
+        }
+
+        function renderFileList() {
+            let div = document.getElementById('fileList');
+            let countEl = document.getElementById('fileCount');
+            let search = (document.getElementById('fileSearch').value || '').toLowerCase();
+            let files = allFiles.filter(function(f) { return !search || f.name.toLowerCase().indexOf(search) >= 0; });
+            let sortMode = (document.getElementById('fileSort') || {}).value || 'time-desc';
+            files.sort(function(a, b) {
+                if (sortMode === 'name-asc') return a.name.localeCompare(b.name);
+                if (sortMode === 'name-desc') return b.name.localeCompare(a.name);
+                if (sortMode === 'size-asc') return a.size - b.size;
+                if (sortMode === 'size-desc') return b.size - a.size;
+                if (sortMode === 'time-asc') return (a.time || 0) - (b.time || 0);
+                return (b.time || 0) - (a.time || 0);
+            });
+            if (countEl) countEl.textContent = allFiles.length > 0 ? '(' + files.length + '/' + allFiles.length + ')' : '';
+            let batchBtn = document.getElementById('batchDelBtn');
+            if (batchBtn) batchBtn.style.display = selectedFiles.size > 0 ? 'inline-block' : 'none';
+            let selectAll = document.getElementById('fileSelectAll');
+            if (selectAll) selectAll.checked = files.length > 0 && files.every(function(f) { return selectedFiles.has(f.name); });
+
+            if (allFiles.length === 0) {
+                div.innerHTML = '<div style="color:#999;font-size:13px;">暂无文件</div>';
+                return;
+            }
+            if (files.length === 0) {
+                div.innerHTML = '<div style="color:#999;font-size:13px;">无匹配文件</div>';
+                return;
+            }
+            div.innerHTML = files.slice(0, fileVisibleCount).map(function(f) {
+                let size = f.size > 1024*1024
+                    ? (f.size / 1024 / 1024).toFixed(1) + ' MB'
+                    : (f.size / 1024).toFixed(1) + ' KB';
+                let date = new Date(f.time * 1000).toLocaleString('zh-CN');
+                let pidMatch = f.name.match(/题库_(\d+)/);
+                let exportLinks = '';
+                if (pidMatch) {
+                    let pid = pidMatch[1];
+                    exportLinks = '<a class="btn btn-download" href="/api/export/' + pid + '?format=csv" download style="background:#fa8c16;">CSV</a>' +
+                                  '<a class="btn btn-download" href="/api/export/' + pid + '?format=json" download style="background:#722ed1;">JSON</a>';
+                }
+                let checked = selectedFiles.has(f.name) ? 'checked' : '';
+                return '<div class="file-item">' +
+                    '<label style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;"><input type="checkbox" ' + checked + ' onclick="toggleFileSelect(\'' + esc(f.name) + '\', this.checked)" style="flex-shrink:0;"><span class="file-name">' + esc(f.name) + '</span></label>' +
+                    '<div class="file-meta">' +
+                        '<span class="file-size">' + size + '</span>' +
+                        '<span class="file-size">' + date + '</span>' +
+                        '<a class="btn btn-download" href="/api/download/' + encodeURIComponent(f.name) + '" download>Excel</a>' +
+                        exportLinks +
+                        '<span class="file-del" onclick="deleteFile(\'' + esc(f.name) + '\')">删除</span>' +
+                    '</div>' +
+                '</div>';
+            }).join('');
+            if (files.length > fileVisibleCount) {
+                div.innerHTML += '<div style="text-align:center;padding:10px;color:#4a90d9;cursor:pointer;font-size:13px;" onclick="loadMoreFiles()">加载更多（剩余 ' + (files.length - fileVisibleCount) + ' 个）</div>';
+            }
+        }
+
+        function loadMoreFiles() {
+            fileVisibleCount += 50;
+            renderFileList();
+        }
+
+        function toggleFileSelect(name, checked) {
+            if (checked) selectedFiles.add(name); else selectedFiles.delete(name);
+            renderFileList();
+        }
+
+        function toggleSelectAllFiles() {
+            let search = (document.getElementById('fileSearch').value || '').toLowerCase();
+            let files = allFiles.filter(function(f) { return !search || f.name.toLowerCase().indexOf(search) >= 0; });
+            let selectAll = document.getElementById('fileSelectAll').checked;
+            files.forEach(function(f) {
+                if (selectAll) selectedFiles.add(f.name); else selectedFiles.delete(f.name);
+            });
+            renderFileList();
+        }
+
+        async function batchDeleteFiles() {
+            let names = Array.from(selectedFiles);
+            if (names.length === 0) return;
+            if (!confirm('确定删除选中的 ' + names.length + ' 个文件？')) return;
+            try {
+                let res = await fetch(window.__p+'/api/delete-files', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ names: names })
+                });
+                let data = await res.json();
+                if (data.ok) {
+                    showToast('已删除 ' + data.removed + ' 个文件' + (data.failed > 0 ? '，' + data.failed + ' 个失败' : ''), 'success');
+                    selectedFiles.clear();
+                    loadFiles();
+                } else {
+                    showToast(data.error || '删除失败', 'error');
+                }
+            } catch (e) {
+                showToast('删除失败', 'error');
+            }
         }
 
         async function deleteFile(name) {
             if (!confirm('确定删除 ' + name + '？')) return;
             try {
-                await fetch('/api/delete-file', {
+                await fetch(window.__p+'/api/delete-file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: name })
@@ -545,9 +1039,32 @@
             }
         }
 
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey || e.metaKey) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    let activeTab = document.querySelector('.tab.active');
+                    if (activeTab && activeTab.textContent.indexOf('单个') >= 0) startTask();
+                    else if (activeTab && activeTab.textContent.indexOf('批量') >= 0) batchStart();
+                } else if (e.key === '1') { e.preventDefault(); switchTab('single'); }
+                else if (e.key === '2') { e.preventDefault(); switchTab('batch'); }
+                else if (e.key === '3') { e.preventDefault(); switchTab('history'); }
+                else if (e.key === 'k' || e.key === 'K') {
+                    e.preventDefault();
+                    let inp = document.getElementById('paperId');
+                    if (inp) inp.focus();
+                }
+            } else if (e.key === 'Escape') {
+                let openLog = document.querySelector('.task-log.show');
+                if (openLog) openLog.classList.remove('show');
+            }
+        });
+
         checkChrome();
         loadFiles();
-        fetch('/api/tasks').then(function(r) { return r.json(); }).then(function(t) {
+        loadConfig();
+        bindConfigChange();
+        fetch(window.__p+'/api/tasks').then(function(r) { return r.json(); }).then(function(t) {
             renderTasks(t);
             if (t.some(function(x) { return x.running; })) startPolling();
         });

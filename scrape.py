@@ -30,10 +30,10 @@ async def main():
     questions = load_progress(paper_id)
     if questions:
         has_ans = sum(1 for q in questions if q.get('正确答案'))
-        logger.info(f"已有进度: {len(questions)} 题, 有答案 {has_ans} 题")
+        logger.info(f"已有进度: {len(questions)} 题, 有答案 {has_ans} 题，将从断点继续")
 
     # 确保Chrome调试模式
-    ok, msg = ensure_chrome_debug()
+    ok, msg, restarted = ensure_chrome_debug()
     logger.info(msg)
     if not ok:
         return
@@ -46,19 +46,40 @@ async def main():
 
         try:
             logger.info("已连接Chrome，打开新标签页")
+            start_sequence = len(questions)
 
-            if not questions:
-                questions, status = await collect_questions(
-                    page, paper_id,
-                    log_fn=lambda m: logger.info(m)
-                )
-                if questions:
-                    save_progress(paper_id, questions)
-                    save_to_excel(questions, output_file)
+            result, status = await collect_questions(
+                page, paper_id,
+                log_fn=lambda m: logger.info(m),
+                start_sequence=start_sequence
+            )
 
-            has_ans = sum(1 for q in questions if q.get('正确答案'))
-            logger.info(f"\n爬取完成! 总 {len(questions)} 道, 有答案 {has_ans} 道")
-            logger.info(f"文件: {output_file}")
+            if status == 'auth_error':
+                logger.error("登录超时或已取消，请在Chrome中登录考试宝后重试")
+                return
+
+            if result:
+                existing_keys = {q.get('题目', '')[:80] for q in questions}
+                added = 0
+                for q in result:
+                    key = q.get('题目', '')[:80]
+                    if key and key not in existing_keys:
+                        q['序号'] = len(questions) + 1
+                        questions.append(q)
+                        existing_keys.add(key)
+                        added += 1
+                logger.info(f"新增 {added} 题，总计 {len(questions)} 题")
+            else:
+                logger.info("未收集到新题目，保留已有数据")
+
+            if questions:
+                save_progress(paper_id, questions)
+                save_to_excel(questions, output_file)
+                has_ans = sum(1 for q in questions if q.get('正确答案'))
+                logger.info(f"\n爬取完成! 总 {len(questions)} 道, 有答案 {has_ans} 道")
+                logger.info(f"文件: {output_file}")
+            else:
+                logger.warning("未收集到任何题目")
 
         except Exception as e:
             logger.exception(f"运行出错: {e}")

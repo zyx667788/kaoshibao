@@ -19,6 +19,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-me-in-production}
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # 资源限制
     deploy:
       resources:
@@ -30,7 +33,7 @@ services:
           memory: 512M
     # 健康检查（Dockerfile已定义，这里可覆盖）
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5678/api/chrome-status')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5678/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

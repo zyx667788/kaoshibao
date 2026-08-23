@@ -1,0 +1,18 @@
+[run]
+source = app,scraper_core,logging_config
+branch = True
+omit =
+    */tests/*
+    */__pycache__/*
+    setup.py
+
+[report]
+show_missing = True
+precision = 2
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:

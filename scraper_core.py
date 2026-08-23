@@ -1,5 +1,7 @@
 """考试宝爬取核心逻辑 - 共享模块"""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
@@ -11,6 +13,7 @@ import time
 import socket
 import os
 from pathlib import Path
+from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 
@@ -71,7 +74,7 @@ _BROWSER_PROFILES = [
 ]
 
 
-def is_port_open(port, host='127.0.0.1'):
+def is_port_open(port: int, host: str = '127.0.0.1') -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
         return s.connect_ex((host, port)) == 0
@@ -187,7 +190,7 @@ async def open_cdp_page(playwright):
         return None, None
 
 
-async def navigate_with_retry(page, url, retries=3, timeout=30000):
+async def navigate_with_retry(page, url, retries=3, timeout=30000) -> bool:
     """带重试的页面导航"""
     for attempt in range(retries):
         try:
@@ -205,7 +208,7 @@ async def navigate_with_retry(page, url, retries=3, timeout=30000):
     return None
 
 
-async def close_popups(page):
+async def close_popups(page) -> None:
     """关闭弹窗（覆盖多种常见弹窗类型）"""
     selectors = [
         '.el-dialog__headerbtn',
@@ -242,7 +245,7 @@ async def close_popups(page):
             break
 
 
-async def ocr_element_text(page, selector):
+async def ocr_element_text(page, selector) -> str:
     """截取DOM元素并用OCR识别真实文本（绕过字体反爬）"""
     try:
         el = await page.query_selector(selector)
@@ -261,7 +264,7 @@ async def ocr_element_text(page, selector):
         return ''
 
 
-async def ocr_region_text(page, x, y, w, h):
+async def ocr_region_text(page, x, y, w, h) -> str:
     """截取指定区域并用OCR识别"""
     try:
         img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'ocr_temp.png')
@@ -273,7 +276,7 @@ async def ocr_region_text(page, x, y, w, h):
         return ''
 
 
-async def _ocr_file(img_path):
+async def _ocr_file(img_path) -> str:
     """对图片文件执行OCR，自动加padding+放大提升识别率"""
     from PIL import Image, ImageOps, ImageEnhance
     ocr = _get_ocr()
@@ -297,7 +300,7 @@ async def _ocr_file(img_path):
     return ''.join(line[1] for line in result).strip()
 
 
-async def click_by_text(page, text):
+async def click_by_text(page, text) -> bool:
     """按文本点击元素，返回是否成功点击"""
     # 方法1: Playwright text selector
     try:
@@ -336,7 +339,7 @@ async def click_by_text(page, text):
     }}''')
 
 
-async def enable_recite_mode(page):
+async def enable_recite_mode(page) -> bool:
     """开启背题模式，返回是否成功开启"""
     enabled = await page.evaluate('''() => {
         // 考试宝的背题模式开关可能在多个位置
@@ -366,7 +369,7 @@ async def enable_recite_mode(page):
     return enabled
 
 
-async def wait_for_question(page, timeout=10):
+async def wait_for_question(page, timeout=10) -> bool:
     """等待题目元素出现（包含modal中的题目）"""
     selectors = [
         '.qusetion-title',
@@ -384,7 +387,7 @@ async def wait_for_question(page, timeout=10):
     return False
 
 
-async def get_current_question_dom(page):
+async def get_current_question_dom(page) -> dict | None:
     """获取当前题目数据（DOM直接读取，速度快但有乱码）"""
     data = await page.evaluate('''() => {
         const r = { question: '', options: [], answer: '', analysis: '', type: '' };
@@ -412,7 +415,7 @@ async def get_current_question_dom(page):
     return data
 
 
-async def get_current_question_hybrid(page):
+async def get_current_question_hybrid(page) -> dict | None:
     """混合模式：DOM读结构 + OCR只读题目文本（速度和质量平衡）"""
     from PIL import Image, ImageOps, ImageEnhance
 
@@ -443,15 +446,8 @@ async def get_current_question_hybrid(page):
     return dom_data
 
 
-async def get_current_question(page, mode='ocr'):
-    """获取当前题目数据"""
-    if mode == 'dom':
-        return await get_current_question_dom(page)
-    elif mode == 'hybrid':
-        return await get_current_question_hybrid(page)
-    from PIL import Image, ImageOps
-
-    # 正确答案和题型（DOM结构读取，不受字体影响）
+async def _extract_answer_and_type(page) -> tuple[str, str]:
+    """从DOM提取正确答案和题型"""
     answer = await page.evaluate('''() => {
         const rights = document.querySelectorAll('.option.right');
         if (rights.length > 0) {
@@ -466,11 +462,57 @@ async def get_current_question(page, mode='ocr'):
         if (ansEl) return ansEl.innerText.replace('正确答案', '').trim();
         return '';
     }''')
-
     qtype = await page.evaluate('''() => {
         const el = document.querySelector('.topic-type');
         return el ? el.innerText.trim() : '';
     }''')
+    return answer, qtype
+
+
+def _enhance_and_ocr(img_path: str, scale: int = 3, contrast: float = 1.5, border: int = 25) -> str:
+    """图片放大+增强对比度+padding后OCR，返回OCR路径"""
+    from PIL import Image, ImageOps, ImageEnhance
+    img = Image.open(img_path)
+    scaled = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+    enhanced = ImageEnhance.Contrast(scaled).enhance(contrast)
+    padded = ImageOps.expand(enhanced, border=border, fill='white')
+    ocr_path = img_path.replace('.png', '_final.png')
+    padded.save(ocr_path)
+    return ocr_path
+
+
+async def _ocr_analysis_section(page) -> str:
+    """OCR解析区域文本"""
+    try:
+        anal_el = await page.query_selector('.answer-box-detail')
+        if anal_el:
+            anal_box = await anal_el.bounding_box()
+            if anal_box and anal_box['width'] > 20:
+                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'anal_ocr.png')
+                await page.screenshot(path=img_path, clip={
+                    'x': anal_box['x'] - 5, 'y': anal_box['y'] - 5,
+                    'width': anal_box['width'] + 10, 'height': anal_box['height'] + 10,
+                })
+                ocr_path = _enhance_and_ocr(img_path, border=20)
+                ocr = _get_ocr()
+                result, _ = ocr(ocr_path)
+                if result:
+                    return ' '.join(line[1].strip() for line in result if line[1].strip())
+    except Exception:
+        pass
+    return ''
+
+
+async def get_current_question(page, mode='ocr') -> dict | None:
+    """获取当前题目数据"""
+    if mode == 'dom':
+        return await get_current_question_dom(page)
+    elif mode == 'hybrid':
+        return await get_current_question_hybrid(page)
+    from PIL import Image, ImageOps
+
+    # 正确答案和题型（DOM结构读取，不受字体影响）
+    answer, qtype = await _extract_answer_and_type(page)
 
     # 截取整个modal区域 + OCR
     question = ''
@@ -488,13 +530,7 @@ async def get_current_question(page, mode='ocr'):
                     'width': box['width'] + 20, 'height': box['height'] + 20,
                 })
                 # 放大3倍+增强对比度+加padding
-                from PIL import ImageEnhance
-                img = Image.open(img_path)
-                scaled = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
-                enhanced = ImageEnhance.Contrast(scaled).enhance(1.5)
-                padded = ImageOps.expand(enhanced, border=25, fill='white')
-                ocr_path = img_path.replace('.png', '_final.png')
-                padded.save(ocr_path)
+                ocr_path = _enhance_and_ocr(img_path)
 
                 ocr = _get_ocr()
                 result, _ = ocr(ocr_path)
@@ -643,31 +679,7 @@ async def get_current_question(page, mode='ocr'):
         pass
 
     # 解析（从分析区域OCR或DOM）
-    analysis = ''
-    try:
-        anal_el = await page.query_selector('.answer-box-detail')
-        if anal_el:
-            anal_box = await anal_el.bounding_box()
-            if anal_box and anal_box['width'] > 20:
-                from PIL import Image, ImageOps
-                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'anal_ocr.png')
-                await page.screenshot(path=img_path, clip={
-                    'x': anal_box['x'] - 5, 'y': anal_box['y'] - 5,
-                    'width': anal_box['width'] + 10, 'height': anal_box['height'] + 10,
-                })
-                from PIL import ImageEnhance
-                img = Image.open(img_path)
-                scaled = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
-                enhanced = ImageEnhance.Contrast(scaled).enhance(1.5)
-                padded = ImageOps.expand(enhanced, border=20, fill='white')
-                ocr_path = img_path.replace('.png', '_final.png')
-                padded.save(ocr_path)
-                ocr = _get_ocr()
-                result, _ = ocr(ocr_path)
-                if result:
-                    analysis = ' '.join(line[1].strip() for line in result if line[1].strip())
-    except Exception:
-        pass
+    analysis = await _ocr_analysis_section(page)
 
     return {
         'type': qtype,
@@ -678,7 +690,7 @@ async def get_current_question(page, mode='ocr'):
     }
 
 
-async def trigger_answer(page, question_type):
+async def trigger_answer(page, question_type) -> bool:
     """根据题型触发答案显示，带重试"""
     qtype = question_type or ''
     for attempt in range(2):
@@ -726,7 +738,7 @@ async def trigger_answer(page, question_type):
         await asyncio.sleep(1)
 
 
-async def click_next_question(page):
+async def click_next_question(page) -> bool:
     """点击下一题，多种方式尝试，返回是否成功"""
     # 方法1: 考试宝专用 — .next-preve 中的"下一题"按钮
     clicked = await page.evaluate('''() => {
@@ -780,7 +792,7 @@ async def click_next_question(page):
     return False
 
 
-async def inject_cookies(context, cookies):
+async def inject_cookies(context, cookies) -> None:
     """将cookies注入浏览器上下文"""
     if not cookies:
         return False
@@ -815,7 +827,7 @@ async def inject_cookies(context, cookies):
         return False
 
 
-async def dump_page_info(page, log_fn=None):
+async def dump_page_info(page, log_fn=None) -> None:
     """输出页面诊断信息"""
     def log(msg):
         if log_fn:
@@ -872,7 +884,7 @@ async def dump_page_info(page, log_fn=None):
     return info
 
 
-async def check_login_required(page):
+async def check_login_required(page) -> bool:
     """检查是否需要登录（URL或DOM双重检测）"""
     if 'login' in page.url.lower():
         return True
@@ -887,7 +899,7 @@ async def check_login_required(page):
     }''')
 
 
-async def wait_for_login(page, log_fn=None, stop_check=None, timeout=300):
+async def wait_for_login(page, log_fn=None, stop_check=None, timeout=300) -> bool:
     """等待用户在Chrome中完成登录，返回 True=已登录, False=超时/取消"""
     def log(msg):
         if log_fn:
@@ -918,7 +930,7 @@ async def wait_for_login(page, log_fn=None, stop_check=None, timeout=300):
     return False
 
 
-async def find_practice_url(page, paper_id, log_fn=None):
+async def find_practice_url(page, paper_id, log_fn=None) -> str | None:
     """尝试找到"顺序练习"的实际链接"""
     def log(msg):
         if log_fn:
@@ -974,7 +986,7 @@ async def find_practice_url(page, paper_id, log_fn=None):
     return None
 
 
-async def save_screenshot(page, name, log_fn=None):
+async def save_screenshot(page, name, log_fn=None) -> None:
     """保存截图用于调试"""
     try:
         path = OUTPUT_DIR / f"debug_{name}_{int(time.time())}.png"
@@ -985,8 +997,175 @@ async def save_screenshot(page, name, log_fn=None):
         pass
 
 
+async def _init_recite_mode(page, log_fn=None) -> bool:
+    """开启背题模式并等待题目元素出现，返回是否成功"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        logger.info(msg)
+    log("开启背题模式...")
+    recite_ok = await enable_recite_mode(page)
+    if recite_ok:
+        log("背题模式已开启")
+    else:
+        log("未找到背题模式开关，继续尝试...")
+    await close_popups(page)
+    found = await wait_for_question(page, timeout=10)
+    if not found:
+        log("题目元素未找到，等待5秒后重试...")
+        await asyncio.sleep(5)
+        found = await wait_for_question(page, timeout=10)
+        if not found:
+            log("题目元素仍未找到，输出诊断:")
+            await dump_page_info(page, log_fn)
+            await save_screenshot(page, 'no_question', log_fn)
+            return False
+    return True
+
+
+async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check) -> str:
+    """导航到练习页面，返回状态：ok/auth_error"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        logger.info(msg)
+
+    log(f"打开题库页面 {paper_id}...")
+    await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+    await asyncio.sleep(2)
+    await close_popups(page)
+
+    if await check_login_required(page):
+        logged_in = await wait_for_login(page, log_fn, stop_check)
+        if not logged_in:
+            return 'auth_error'
+        await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+        await asyncio.sleep(2)
+        await close_popups(page)
+        if await check_login_required(page):
+            log("登录后仍无法访问题库")
+            return 'auth_error'
+
+    if start_sequence > 0:
+        practice_url = (
+            f'https://www.kaoshibao.com/online/?paperId={paper_id}'
+            f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
+            f'&text=顺序练习&sequence={start_sequence}'
+            f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
+            f'&qtype_random_index={start_sequence}'
+        )
+        log(f"分段模式：跳到第 {start_sequence + 1} 题...")
+        await navigate_with_retry(page, practice_url)
+        await asyncio.sleep(3)
+        await close_popups(page)
+    else:
+        log("页面诊断:")
+        await dump_page_info(page, log_fn)
+        paper_url = page.url
+        log("点击顺序练习...")
+        clicked = await page.evaluate('''() => {
+            const allItems = document.querySelectorAll('a.item, a[href="javascript:;"]');
+            for (const a of allItems) {
+                if (a.innerText?.includes('顺序练习')) {
+                    ['mousedown', 'mouseup', 'click'].forEach(type => {
+                        a.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                    });
+                    return true;
+                }
+            }
+            return false;
+        }''')
+        log(f"  点击结果: {clicked}")
+        for wait_i in range(10):
+            await asyncio.sleep(1)
+            if page.url != paper_url:
+                break
+        await close_popups(page)
+        if page.url == paper_url:
+            log("  URL未变化，尝试直接访问练习页面...")
+            practice_url = await find_practice_url(page, paper_id, log_fn)
+            if practice_url:
+                await navigate_with_retry(page, practice_url)
+                await asyncio.sleep(2)
+                await close_popups(page)
+        if await check_login_required(page):
+            log("进入练习页后需要登录...")
+            logged_in = await wait_for_login(page, log_fn, stop_check)
+            if not logged_in:
+                return 'auth_error'
+            await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+            await asyncio.sleep(2)
+            await close_popups(page)
+            await click_by_text(page, '顺序练习')
+            await asyncio.sleep(5)
+            await close_popups(page)
+            if await check_login_required(page):
+                log("登录后仍无法进入练习页面")
+                return 'auth_error'
+
+    log(f"当前URL: {page.url}")
+    return 'ok'
+
+
+def _is_valid_question_text(q_text: str) -> bool:
+    """判断题目文本是否有效：至少10字符，包含中文，不全是噪音"""
+    has_chinese = bool(re.search(r'[一-鿿]', q_text))
+    return len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
+
+
+def _add_question_if_new(data: dict[str, Any], questions: list, existing_keys: set,
+                         paper_id: str, mode: str, progress_fn) -> bool:
+    """去重并添加题目，返回是否为新题"""
+    q_key = data['question'][:80]
+    if q_key in existing_keys:
+        return False
+    questions.append({
+        '序号': len(questions) + 1,
+        '题目类型': data.get('type', ''),
+        '题目': data.get('question', ''),
+        '选项': data.get('options', []),
+        '正确答案': data.get('answer', ''),
+        '解析': data.get('analysis', '')
+    })
+    existing_keys.add(q_key)
+    if progress_fn:
+        has_ans = sum(1 for q in questions if q.get('正确答案'))
+        progress_fn(len(questions), has_ans)
+    save_progress(paper_id, questions, suffix=f'_{mode}' if mode and mode != 'ocr' else '')
+    return True
+
+
+async def _recover_page(page, paper_id, questions: list, log_fn=None) -> bool:
+    """页面恢复：重新导航到练习页面"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        logger.info(msg)
+    log("尝试恢复页面...")
+    try:
+        await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
+        await asyncio.sleep(3)
+        await close_popups(page)
+        practice_url = (
+            f'https://www.kaoshibao.com/online/?paperId={paper_id}'
+            f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
+            f'&text=顺序练习&sequence={len(questions)}'
+            f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
+            f'&qtype_random_index={len(questions)}'
+        )
+        await navigate_with_retry(page, practice_url)
+        await asyncio.sleep(3)
+        await close_popups(page)
+        await enable_recite_mode(page)
+        await asyncio.sleep(2)
+        return True
+    except Exception as e:
+        log(f"恢复失败: {e}")
+        return False
+
+
 async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progress_fn=None,
-                           start_sequence=0, max_questions=0, mode='ocr'):
+                           start_sequence=0, max_questions=0, mode='ocr') -> tuple[list[dict[str, Any]], str]:
     """
     背题模式下收集所有题目+答案+解析
 
@@ -1008,141 +1187,17 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
         logger.info(msg)
 
     try:
-        log(f"打开题库页面 {paper_id}...")
-        await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
-        await asyncio.sleep(2)
-        await close_popups(page)
+        status = await _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check)
+        if status != 'ok':
+            return questions, status
 
-        # 如果需要登录，等待用户完成
-        if await check_login_required(page):
-            logged_in = await wait_for_login(page, log_fn, stop_check)
-            if not logged_in:
-                return questions, 'auth_error'
-            await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
-            await asyncio.sleep(2)
-            await close_popups(page)
-            if await check_login_required(page):
-                log("登录后仍无法访问题库")
-                return questions, 'auth_error'
-
-        # 进入练习页面
-        if start_sequence > 0:
-            # 分段模式：直接跳到指定sequence
-            practice_url = (
-                f'https://www.kaoshibao.com/online/?paperId={paper_id}'
-                f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
-                f'&text=顺序练习&sequence={start_sequence}'
-                f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
-                f'&qtype_random_index={start_sequence}'
-            )
-            log(f"分段模式：跳到第 {start_sequence + 1} 题...")
-            await navigate_with_retry(page, practice_url)
-            await asyncio.sleep(3)
-            await close_popups(page)
-        else:
-            # 正常模式：点击顺序练习
-            log("页面诊断:")
-            await dump_page_info(page, log_fn)
-
-            paper_url = page.url
-            log("点击顺序练习...")
-
-            clicked = await page.evaluate('''() => {
-                const allItems = document.querySelectorAll('a.item, a[href="javascript:;"]');
-                for (const a of allItems) {
-                    if (a.innerText?.includes('顺序练习')) {
-                        ['mousedown', 'mouseup', 'click'].forEach(type => {
-                            a.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                        });
-                        return true;
-                    }
-                }
-                return false;
-            }''')
-            log(f"  点击结果: {clicked}")
-
-            for wait_i in range(10):
-                await asyncio.sleep(1)
-                if page.url != paper_url:
-                    break
-            await close_popups(page)
-
-            if page.url == paper_url:
-                log("  URL未变化，尝试直接访问练习页面...")
-                practice_url = await find_practice_url(page, paper_id, log_fn)
-                if practice_url:
-                    await navigate_with_retry(page, practice_url)
-                    await asyncio.sleep(2)
-                    await close_popups(page)
-
-            # 检查是否被重定向到登录页
-            if await check_login_required(page):
-                log("进入练习页后需要登录...")
-                logged_in = await wait_for_login(page, log_fn, stop_check)
-                if not logged_in:
-                    return questions, 'auth_error'
-                await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
-                await asyncio.sleep(2)
-                await close_popups(page)
-                await click_by_text(page, '顺序练习')
-                await asyncio.sleep(5)
-                await close_popups(page)
-                if await check_login_required(page):
-                    log("登录后仍无法进入练习页面")
-                    return questions, 'auth_error'
-
-        log(f"当前URL: {page.url}")
-
-        # 开启背题模式
-        log("开启背题模式...")
-        recite_ok = await enable_recite_mode(page)
-        if recite_ok:
-            log("背题模式已开启")
-        else:
-            log("未找到背题模式开关，继续尝试...")
-        await close_popups(page)
-
-        # 等待题目元素出现
-        found = await wait_for_question(page, timeout=10)
-        if not found:
-            log("题目元素未找到，等待5秒后重试...")
-            await asyncio.sleep(5)
-            found = await wait_for_question(page, timeout=10)
-            if not found:
-                log("题目元素仍未找到，输出诊断:")
-                await dump_page_info(page, log_fn)
-                await save_screenshot(page, 'no_question', log_fn)
-                return questions, 'error'
+        if not await _init_recite_mode(page, log_fn):
+            return questions, 'error'
 
         log("开始收集...")
         consecutive_failures = 0
         no_new_count = 0
         last_success_i = 0  # 上次成功收集的迭代编号
-
-        async def recover_page():
-            """页面恢复：重新导航到练习页面"""
-            log("尝试恢复页面...")
-            try:
-                await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
-                await asyncio.sleep(3)
-                await close_popups(page)
-                # 重新进入练习
-                practice_url = (
-                    f'https://www.kaoshibao.com/online/?paperId={paper_id}'
-                    f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
-                    f'&text=顺序练习&sequence={len(questions)}'
-                    f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
-                    f'&qtype_random_index={len(questions)}'
-                )
-                await navigate_with_retry(page, practice_url)
-                await asyncio.sleep(3)
-                await close_popups(page)
-                await enable_recite_mode(page)
-                await asyncio.sleep(2)
-                return True
-            except Exception as e:
-                log(f"恢复失败: {e}")
-                return False
 
         for i in range(10000):
             if stop_check and stop_check():
@@ -1161,14 +1216,14 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 if not logged_in:
                     log("登录过期，停止收集")
                     break
-                await recover_page()
+                await _recover_page(page, paper_id, questions, log_fn)
 
             await close_popups(page)
 
             # 卡住检测：如果连续30次迭代没有新题目，尝试恢复页面
             if i - last_success_i >= 30 and last_success_i > 0:
                 log(f"已连续{i - last_success_i}次无新题目，尝试恢复页面...")
-                if await recover_page():
+                if await _recover_page(page, paper_id, questions, log_fn):
                     last_success_i = i
                     consecutive_failures = 0
                 else:
@@ -1180,7 +1235,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 consecutive_failures += 1
                 if consecutive_failures >= 20:
                     log("连续20次未加载到题目，尝试恢复...")
-                    if await recover_page():
+                    if await _recover_page(page, paper_id, questions, log_fn):
                         consecutive_failures = 0
                         continue
                     else:
@@ -1189,29 +1244,22 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 continue
 
             data = await get_current_question(page, mode=mode)
-            # 判断题目是否有效：至少10字符，包含中文，不全是噪音
-            q_text = data.get('question', '')
-            has_chinese = bool(re.search(r'[一-鿿]', q_text))
-            is_valid = len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
-            if not is_valid:
+            if not _is_valid_question_text(data.get('question', '')):
                 consecutive_failures += 1
-                # OCR偶尔失败，重试
                 if consecutive_failures % 3 == 0:
                     await asyncio.sleep(2)
                     data = await get_current_question(page, mode=mode)
-                    q_text = data.get('question', '')
-                    has_chinese = bool(re.search(r'[一-鿿]', q_text))
-                    is_valid = len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
-                if not is_valid:
-                    if consecutive_failures >= 20:
-                        log("连续20次无法读取有效题目，尝试恢复...")
-                        if await recover_page():
-                            consecutive_failures = 0
-                            continue
-                        else:
-                            break
-                    await asyncio.sleep(1)
-                    continue
+                    if _is_valid_question_text(data.get('question', '')):
+                        consecutive_failures = 0
+                if consecutive_failures >= 20:
+                    log("连续20次无法读取有效题目，尝试恢复...")
+                    if await _recover_page(page, paper_id, questions, log_fn):
+                        consecutive_failures = 0
+                        continue
+                    else:
+                        break
+                await asyncio.sleep(1)
+                continue
             consecutive_failures = 0
 
             # 触发答案显示
@@ -1220,26 +1268,9 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 data = await get_current_question(page, mode=mode)
 
             # 去重并保存
-            q_key = data['question'][:80]
-            if q_key not in existing_keys:
-                questions.append({
-                    '序号': len(questions) + 1,
-                    '题目类型': data.get('type', ''),
-                    '题目': data.get('question', ''),
-                    '选项': data.get('options', []),
-                    '正确答案': data.get('answer', ''),
-                    '解析': data.get('analysis', '')
-                })
-                existing_keys.add(q_key)
+            if _add_question_if_new(data, questions, existing_keys, paper_id, mode, progress_fn):
                 no_new_count = 0
                 last_success_i = i
-
-                if progress_fn:
-                    has_ans = sum(1 for q in questions if q.get('正确答案'))
-                    progress_fn(len(questions), has_ans)
-
-                # 每题保存进度
-                save_progress(paper_id, questions, suffix=f'_{mode}' if mode and mode != 'ocr' else '')
             else:
                 no_new_count += 1
                 if no_new_count >= 10:
@@ -1260,7 +1291,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 consecutive_failures += 1
                 if consecutive_failures >= 15:
                     log("连续15次无法翻到下一题，尝试恢复...")
-                    if await recover_page():
+                    if await _recover_page(page, paper_id, questions, log_fn):
                         consecutive_failures = 0
                         continue
                     else:
@@ -1278,7 +1309,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
     return questions, 'ok'
 
 
-def save_to_excel(questions, filepath):
+def save_to_excel(questions: list[dict[str, Any]], filepath: str) -> None:
     """保存题目到Excel（选项分列显示）"""
     wb = Workbook()
     ws = wb.active
@@ -1294,17 +1325,9 @@ def save_to_excel(questions, filepath):
         ws.cell(row=row, column=3, value=q.get('题目', ''))
 
         # 选项分列
-        opts = q.get('选项', [])
-        if isinstance(opts, str):
-            opts = [o.strip() for o in opts.split('\n') if o.strip()]
+        opts = _normalize_options(q.get('选项', []))
         for i, opt in enumerate(opts[:6]):
-            # 去掉选项前面的A/B/C/D前缀（如果有）
-            cleaned = opt
-            if len(cleaned) > 2 and cleaned[0] in 'ABCDEF' and cleaned[1] in '.、 ':
-                cleaned = cleaned[2:].strip()
-            elif len(cleaned) > 3 and cleaned[0] in 'ABCDEF' and cleaned[1:3] in ['. ', '、 ']:
-                cleaned = cleaned[3:].strip()
-            ws.cell(row=row, column=4 + i, value=cleaned)
+            ws.cell(row=row, column=4 + i, value=opt)
 
         ws.cell(row=row, column=10, value=q.get('正确答案', ''))
         ws.cell(row=row, column=11, value=q.get('解析', ''))
@@ -1329,7 +1352,71 @@ def save_to_excel(questions, filepath):
     wb.save(filepath)
 
 
-def load_progress(paper_id, suffix=''):
+def _normalize_options(opts) -> list[str]:
+    """统一选项为列表形式"""
+    if isinstance(opts, str):
+        opts = [o.strip() for o in opts.split('\n') if o.strip()]
+    cleaned_list = []
+    for opt in (opts or []):
+        cleaned = opt
+        if len(cleaned) > 2 and cleaned[0] in 'ABCDEF' and cleaned[1] in '.、 ':
+            cleaned = cleaned[2:].strip()
+        elif len(cleaned) > 3 and cleaned[0] in 'ABCDEF' and cleaned[1:3] in ['. ', '、 ']:
+            cleaned = cleaned[3:].strip()
+        cleaned_list.append(cleaned)
+    return cleaned_list
+
+
+def save_to_csv(questions: list[dict[str, Any]], filepath: str) -> None:
+    """保存题目到CSV（UTF-8 BOM，Excel 友好）"""
+    import csv
+    headers = ['序号', '题目类型', '题目', '选项A', '选项B', '选项C', '选项D', '选项E', '选项F', '正确答案', '解析']
+    with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for q in questions:
+            opts = _normalize_options(q.get('选项', []))
+            row = [
+                q.get('序号', ''),
+                q.get('题目类型', ''),
+                q.get('题目', ''),
+            ]
+            for i in range(6):
+                row.append(opts[i] if i < len(opts) else '')
+            row.append(q.get('正确答案', ''))
+            row.append(q.get('解析', ''))
+            writer.writerow(row)
+
+
+def save_to_json(questions: list[dict[str, Any]], filepath: str) -> None:
+    """保存题目到JSON（结构化，含选项数组）"""
+    structured = []
+    for q in questions:
+        opts = _normalize_options(q.get('选项', []))
+        structured.append({
+            '序号': q.get('序号', ''),
+            '题目类型': q.get('题目类型', ''),
+            '题目': q.get('题目', ''),
+            '选项': opts,
+            '正确答案': q.get('正确答案', ''),
+            '解析': q.get('解析', ''),
+        })
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(structured, f, ensure_ascii=False, indent=2)
+
+
+def export_questions(questions: list[dict[str, Any]], filepath: str, fmt: str = 'xlsx') -> None:
+    """统一导出入口：根据格式调用对应保存函数"""
+    fmt = (fmt or 'xlsx').lower()
+    if fmt == 'csv':
+        save_to_csv(questions, filepath)
+    elif fmt == 'json':
+        save_to_json(questions, filepath)
+    else:
+        save_to_excel(questions, filepath)
+
+
+def load_progress(paper_id: str, suffix: str = '') -> list[dict[str, Any]]:
     """加载已有进度"""
     progress_file = DATA_DIR / f"progress_{paper_id}{suffix}.json"
     if progress_file.exists():
@@ -1341,14 +1428,16 @@ def load_progress(paper_id, suffix=''):
     return []
 
 
-def save_progress(paper_id, questions, suffix=''):
-    """保存进度"""
+def save_progress(paper_id: str, questions: list[dict[str, Any]], suffix: str = '') -> None:
+    """保存进度（原子写入，防止中断损坏）"""
     progress_file = DATA_DIR / f"progress_{paper_id}{suffix}.json"
-    with open(progress_file, 'w', encoding='utf-8') as f:
+    tmp_file = progress_file.with_suffix('.json.tmp')
+    with open(tmp_file, 'w', encoding='utf-8') as f:
         json.dump(questions, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_file, progress_file)
 
 
-def load_segment_progress(paper_id, segment_id):
+def load_segment_progress(paper_id: str, segment_id: int) -> list[dict[str, Any]]:
     """加载分段进度"""
     progress_file = DATA_DIR / f"progress_{paper_id}_seg{segment_id}.json"
     if progress_file.exists():
@@ -1360,14 +1449,16 @@ def load_segment_progress(paper_id, segment_id):
     return []
 
 
-def save_segment_progress(paper_id, segment_id, questions):
-    """保存分段进度"""
+def save_segment_progress(paper_id: str, segment_id: int, questions: list[dict[str, Any]]) -> None:
+    """保存分段进度（原子写入）"""
     progress_file = DATA_DIR / f"progress_{paper_id}_seg{segment_id}.json"
-    with open(progress_file, 'w', encoding='utf-8') as f:
+    tmp_file = progress_file.with_suffix('.json.tmp')
+    with open(tmp_file, 'w', encoding='utf-8') as f:
         json.dump(questions, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_file, progress_file)
 
 
-def merge_segments(paper_id, num_segments):
+def merge_segments(paper_id: str, num_segments: int) -> list[dict[str, Any]]:
     """合并所有分段的结果，去重后保存为最终文件"""
     all_questions = []
     seen = set()
@@ -1393,7 +1484,7 @@ def merge_segments(paper_id, num_segments):
     return all_questions
 
 
-def validate_paper_id(raw):
+def validate_paper_id(raw: str) -> tuple[str | None, str | None]:
     """验证并提取题库ID，返回 (paper_id, error_msg)"""
     raw = raw.strip()
     if not raw:
@@ -1410,7 +1501,7 @@ def validate_paper_id(raw):
     return raw, None
 
 
-def sanitize_text(text):
+def sanitize_text(text: Any) -> str:
     """转义HTML特殊字符，用于前端安全渲染"""
     if not text:
         return ''

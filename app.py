@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import re
 import sys
 import io
 import threading
 import time
 import uuid
+import os
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file
 
@@ -14,7 +16,8 @@ from scraper_core import (
     OUTPUT_DIR, DATA_DIR, CDP_URL, collect_questions,
     save_to_excel, load_progress, save_progress,
     validate_paper_id, ensure_chrome_debug, get_chrome_status, open_cdp_page,
-    reopen_kaoshibao, load_segment_progress, save_segment_progress, merge_segments
+    reopen_kaoshibao, load_segment_progress, save_segment_progress, merge_segments,
+    save_to_csv, save_to_json, export_questions
 )
 
 from logging_config import init_default_logger, get_logger
@@ -29,7 +32,102 @@ logger = get_logger("kaoshibao.app")
 
 app = Flask(__name__, template_folder=str(Path(__file__).parent / 'templates'))
 
+# 安全配置：从环境变量读取 SECRET_KEY，未设置则生成临时值并警告
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', '')
+if not app.secret_key:
+    app.secret_key = os.urandom(32).hex()
+    logger.warning("FLASK_SECRET_KEY 未设置，使用临时随机密钥（重启后 session 失效）")
+
+# 请求体大小上限（1MB，足够 JSON 请求，防止超大请求耗尽内存）
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
+
+# 可选认证token（设置AUTH_TOKEN环境变量后启用）
+AUTH_TOKEN = os.environ.get('AUTH_TOKEN', '')
+
+
+@app.after_request
+def set_security_headers(resp):
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    resp.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    resp.headers['X-XSS-Protection'] = '1; mode=block'
+    resp.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'self'"
+    )
+    return resp
+
+
+@app.before_request
+def auth_check():
+    """可选token认证：设置AUTH_TOKEN环境变量后启用"""
+    if not AUTH_TOKEN:
+        return None
+    if request.path in ('/', '/health', '/manifest.json', '/api/docs'):
+        return None
+    token = request.headers.get('X-Auth-Token', '') or request.args.get('token', '')
+    if token != AUTH_TOKEN:
+        return jsonify({'error': '未授权'}), 401
+
+
+@app.before_request
+def csrf_origin_check():
+    """CSRF防护：验证POST请求的Origin头（OWASP推荐方案）"""
+    if request.method == 'POST':
+        origin = request.headers.get('Origin')
+        if origin:
+            from urllib.parse import urlparse
+            origin_host = urlparse(origin).netloc
+            request_host = request.headers.get('Host', '')
+            if origin_host and request_host and origin_host != request_host:
+                if ':' not in request_host:
+                    origin_port = urlparse(origin).port
+                    default_port = 443 if urlparse(origin).scheme == 'https' else 80
+                    if origin_port and origin_port != default_port:
+                        return jsonify({'error': '跨站请求被拒绝'}), 403
+                else:
+                    return jsonify({'error': '跨站请求被拒绝'}), 403
+
+
+def _is_api_request():
+    return request.path.startswith('/api/') or request.path.startswith('/health')
+
+
+@app.errorhandler(404)
+def not_found(e):
+    if _is_api_request():
+        return jsonify({'error': '资源不存在', 'code': 404}), 404
+    return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>404 - 页面不存在</title><style>body{font-family:sans-serif;text-align:center;padding:50px;color:#666}h1{font-size:48px;color:#4a90d9}a{color:#4a90d9;text-decoration:none}</style></head><body><h1>404</h1><p>页面不存在</p><a href="/">返回首页</a></body></html>', 404
+
+
+@app.errorhandler(413)
+def too_large(e):
+    if _is_api_request():
+        return jsonify({'error': '请求体过大，超过 1MB 限制', 'code': 413}), 413
+    return jsonify({'error': '请求体过大'}), 413
+
+
+@app.errorhandler(500)
+def server_error(e):
+    logger.exception(f"服务器内部错误: {e}")
+    if _is_api_request():
+        return jsonify({'error': '服务器内部错误', 'code': 500}), 500
+    return jsonify({'error': '服务器内部错误'}), 500
+
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    if _is_api_request():
+        return jsonify({'error': '请求方法不允许', 'code': 405}), 405
+    return jsonify({'error': '请求方法不允许'}), 405
+
 MAX_TASKS = 5
+_start_time = time.time()
 
 tasks = {}
 tasks_lock = threading.Lock()
@@ -37,6 +135,37 @@ tasks_lock = threading.Lock()
 # 速率限制
 _rate_limit = {}
 _rate_limit_lock = threading.Lock()
+_rate_limit_file = DATA_DIR / 'rate_limit.json'
+
+
+def _load_rate_limit():
+    """启动时从文件加载速率限制数据"""
+    global _rate_limit
+    try:
+        if _rate_limit_file.exists():
+            with open(_rate_limit_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            now = time.time()
+            with _rate_limit_lock:
+                _rate_limit = {k: v for k, v in data.items() if now - v < 3600}
+    except Exception:
+        pass
+
+
+def _save_rate_limit():
+    """退出时保存速率限制到文件"""
+    try:
+        with _rate_limit_lock:
+            data = dict(_rate_limit)
+        with open(_rate_limit_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+_load_rate_limit()
+import atexit
+atexit.register(_save_rate_limit)
 
 
 def new_task(paper_id, segment_id=-1, start_sequence=0, max_questions=0, mode='ocr'):
@@ -58,6 +187,8 @@ def new_task(paper_id, segment_id=-1, start_sequence=0, max_questions=0, mode='o
         'created_at': time.time(),
         'output_file': '',
         'started_at': 0,
+        'timeout': 3600,
+        'timed_out': False,
     }
 
 
@@ -67,10 +198,7 @@ def task_log(task, msg):
     task['log'].append(entry)
     if len(task['log']) > 200:
         task['log'] = task['log'][-200:]
-    try:
-        print(f"[{task['task_id'][:8]}] {msg}")
-    except UnicodeEncodeError:
-        print(f"[{task['task_id'][:8]}] (含特殊字符，已跳过输出)")
+    logger.info(f"[{task['task_id'][:8]}] {msg}")
 
 
 def check_rate_limit(ip, min_interval=1.0):
@@ -97,6 +225,105 @@ def get_request_json():
     return data, None
 
 
+def _merge_questions(result: list, questions: list) -> int:
+    """合并新收集的题目到已有列表，返回新增数量"""
+    existing_keys = {q.get('题目', '')[:80] for q in questions}
+    added = 0
+    for q in result:
+        key = q.get('题目', '')[:80]
+        if key and key not in existing_keys:
+            q['序号'] = len(questions) + 1
+            questions.append(q)
+            existing_keys.add(key)
+            added += 1
+    return added
+
+
+def _finalize_task_success(task, questions, is_segment, paper_id, segment_id, mode_suffix, output_file):
+    """任务成功完成后的保存和状态更新"""
+    if is_segment:
+        save_segment_progress(paper_id, segment_id, questions)
+    elif questions:
+        save_progress(paper_id, questions, suffix=mode_suffix)
+        save_to_excel(questions, output_file)
+    try:
+        from db_store import save_questions_to_db, is_db_configured
+        if is_db_configured():
+            save_questions_to_db(paper_id, questions, task.get('mode', 'ocr'))
+    except Exception as e:
+        logger.warning(f"数据库保存失败(不影响文件存储): {e}")
+    task['phase'] = 'done'
+    task['has_answer'] = sum(1 for q in questions if q.get('正确答案'))
+    task['total'] = len(questions)
+    task['progress'] = len(questions)
+    task_log(task, f"完成! 总 {len(questions)} 道, 有答案 {task['has_answer']} 道")
+    task['message'] = f"完成! {len(questions)}题, {task['has_answer']}道有答案"
+
+
+async def _do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max_questions, mode, questions):
+    """执行异步爬取"""
+    from playwright.async_api import async_playwright
+    label = f"分段{segment_id}" if is_segment else ""
+    task_log(task, f"连接Chrome{'('+label+')' if is_segment else ''}...")
+    async with async_playwright() as p:
+        browser, page = await open_cdp_page(p)
+        if not browser:
+            task_log(task, "无法连接Chrome，请确保Chrome已启动并登录考试宝")
+            task['phase'] = 'error'
+            task['message'] = '无法连接Chrome'
+            return questions
+        try:
+            task_log(task, "已连接Chrome，打开新标签页")
+            task['phase'] = 'collect'
+            task['started_at'] = time.time()
+
+            def on_progress(collected, with_answer):
+                task['total'] = collected
+                task['progress'] = collected
+                task['has_answer'] = with_answer
+
+            def stop_with_timeout():
+                if task.get('stop_requested'):
+                    return True
+                if task.get('started_at') and time.time() - task['started_at'] > task.get('timeout', 3600):
+                    task['stop_requested'] = True
+                    task['timed_out'] = True
+                    task_log(task, "任务超时，正在停止...")
+                    return True
+                return False
+
+            result, status = await collect_questions(
+                page, paper_id,
+                log_fn=lambda msg: task_log(task, msg),
+                stop_check=stop_with_timeout,
+                progress_fn=on_progress,
+                start_sequence=start_sequence,
+                max_questions=max_questions,
+                mode=mode
+            )
+
+            if status == 'auth_error':
+                task['phase'] = 'error'
+                task['message'] = '登录超时或已取消，请在Chrome中登录考试宝后重试'
+                return questions
+
+            if result:
+                added = _merge_questions(result, questions)
+                task_log(task, f"新增 {added} 题，总计 {len(questions)} 题")
+            else:
+                task_log(task, "未收集到新题目，保留已有数据")
+            return questions
+        except Exception as e:
+            logger.exception(f"爬取出错: {e}")
+            task_log(task, f"爬取出错: {e}")
+            return questions
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
 def run_task(task_id):
     task = tasks[task_id]
     paper_id = task['paper_id']
@@ -118,94 +345,14 @@ def run_task(task_id):
             task['has_answer'] = sum(1 for q in questions if q.get('正确答案'))
             task['total'] = len(questions)
             task['progress'] = len(questions)
-            # 从上次停止的位置继续
             start_sequence = len(questions)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        from playwright.async_api import async_playwright
-
-        async def do_scrape():
-            nonlocal questions
-
-            label = f"分段{segment_id}" if is_segment else ""
-            task_log(task, f"连接Chrome{'('+label+')' if is_segment else ''}...")
-            async with async_playwright() as p:
-                browser, page = await open_cdp_page(p)
-                if not browser:
-                    task_log(task, "无法连接Chrome，请确保Chrome已启动并登录考试宝")
-                    task['phase'] = 'error'
-                    task['message'] = '无法连接Chrome'
-                    return questions
-
-                try:
-                    task_log(task, "已连接Chrome，打开新标签页")
-                    task['phase'] = 'collect'
-                    task['started_at'] = time.time()
-
-                    def on_progress(collected, with_answer):
-                        task['total'] = collected
-                        task['progress'] = collected
-                        task['has_answer'] = with_answer
-
-                    result, status = await collect_questions(
-                        page, paper_id,
-                        log_fn=lambda msg: task_log(task, msg),
-                        stop_check=lambda: task.get('stop_requested'),
-                        progress_fn=on_progress,
-                        start_sequence=start_sequence,
-                        max_questions=max_questions,
-                        mode=mode
-                    )
-
-                    if status == 'auth_error':
-                        task['phase'] = 'error'
-                        task['message'] = '登录超时或已取消，请在Chrome中登录考试宝后重试'
-                        return questions
-
-                    if result:
-                        # 合并新旧题目
-                        existing_keys = {q.get('题目', '')[:80] for q in questions}
-                        added = 0
-                        for q in result:
-                            key = q.get('题目', '')[:80]
-                            if key and key not in existing_keys:
-                                q['序号'] = len(questions) + 1
-                                questions.append(q)
-                                existing_keys.add(key)
-                                added += 1
-                        task_log(task, f"新增 {added} 题，总计 {len(questions)} 题")
-                    else:
-                        task_log(task, "未收集到新题目，保留已有数据")
-                    return questions
-
-                except Exception as e:
-                    logger.exception(f"爬取出错: {e}")
-                    task_log(task, f"爬取出错: {e}")
-                    return questions
-                finally:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-
-        loop.run_until_complete(do_scrape())
-
-        if is_segment:
-            save_segment_progress(paper_id, segment_id, questions)
-        elif questions:
-            save_progress(paper_id, questions, suffix=mode_suffix)
-            save_to_excel(questions, output_file)
-
-        task['phase'] = 'done'
-        task['has_answer'] = sum(1 for q in questions if q.get('正确答案'))
-        task['total'] = len(questions)
-        task['progress'] = len(questions)
-        task_log(task, f"完成! 总 {len(questions)} 道, 有答案 {task['has_answer']} 道")
-        task['message'] = f"完成! {len(questions)}题, {task['has_answer']}道有答案"
-
+        loop.run_until_complete(_do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max_questions, mode, questions))
+        _finalize_task_success(task, questions, is_segment, paper_id, segment_id, mode_suffix, output_file)
     except Exception as e:
         logger.exception(f"任务执行错误: {e}")
         task_log(task, f"错误: {e}")
@@ -291,6 +438,8 @@ def list_tasks():
                 'output_file': t['output_file'],
                 'created_at': t['created_at'],
                 'elapsed': elapsed,
+                'timeout': t.get('timeout', 3600),
+                'timed_out': t.get('timed_out', False),
             })
     return jsonify(result)
 
@@ -310,6 +459,9 @@ def start_task():
         return jsonify({'error': err}), 400
 
     mode = data.get('mode', 'ocr')
+    VALID_MODES = {'ocr', 'dom', 'hybrid', 'race'}
+    if mode not in VALID_MODES:
+        return jsonify({'error': f'无效的读取模式: {mode}'}), 400
 
     # 检查Chrome是否可用
     if not get_chrome_status():
@@ -357,6 +509,8 @@ def start_task():
 
 @app.route('/api/stop/<task_id>', methods=['POST'])
 def stop_task(task_id):
+    if not re.match(r'^[a-f0-9]{8}$', task_id):
+        return jsonify({'error': '无效的任务ID'}), 400
     with tasks_lock:
         task = tasks.get(task_id)
         if not task:
@@ -370,6 +524,8 @@ def stop_task(task_id):
 
 @app.route('/api/remove/<task_id>', methods=['POST'])
 def remove_task(task_id):
+    if not re.match(r'^[a-f0-9]{8}$', task_id):
+        return jsonify({'error': '无效的任务ID'}), 400
     with tasks_lock:
         task = tasks.get(task_id)
         if not task:
@@ -397,7 +553,6 @@ def list_files():
 def download_file(filename):
     if not filename or '..' in filename or '/' in filename or '\\' in filename:
         return jsonify({'error': '无效文件名'}), 400
-    import re
     if not re.match(r'^[\w\-\.一-鿿]+$', filename):
         return jsonify({'error': '无效文件名'}), 400
     filepath = OUTPUT_DIR / filename
@@ -441,9 +596,13 @@ def batch_start():
 
     results = []
     for raw_id in ids_raw:
-        paper_id, err = validate_paper_id(str(raw_id))
+        raw_str = str(raw_id)
+        if len(raw_str) > 200:
+            results.append({'id': raw_str[:50], 'error': 'ID 过长'})
+            continue
+        paper_id, err = validate_paper_id(raw_str)
         if err:
-            results.append({'id': str(raw_id), 'error': err})
+            results.append({'id': raw_str, 'error': err})
             continue
 
         with tasks_lock:
@@ -563,6 +722,243 @@ def merge_segments_api():
         'total': len(result),
         'has_answer': has_ans
     })
+
+
+@app.route('/api/delete-files', methods=['POST'])
+def delete_files_batch():
+    """批量删除文件"""
+    data, err = get_request_json()
+    if err:
+        return jsonify({'error': err}), 400
+    names = data.get('names', [])
+    if not isinstance(names, list) or len(names) == 0:
+        return jsonify({'error': '请提供文件名列表'}), 400
+    if len(names) > 100:
+        return jsonify({'error': '单次最多删除 100 个文件'}), 400
+    removed = 0
+    failed = 0
+    for name in names:
+        if not name or '..' in name or '/' in name or '\\' in name or len(str(name)) > 255:
+            failed += 1
+            continue
+        filepath = OUTPUT_DIR / name
+        if filepath.exists() and filepath.suffix == '.xlsx':
+            try:
+                filepath.unlink()
+                removed += 1
+            except Exception:
+                failed += 1
+        else:
+            failed += 1
+    return jsonify({'ok': True, 'removed': removed, 'failed': failed})
+
+
+@app.route('/api/cleanup', methods=['POST'])
+def cleanup_old_progress():
+    """清理超过指定天数未修改的进度文件"""
+    data, err = get_request_json()
+    if err:
+        data = {}
+    days = data.get('days', 30) if data else 30
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days 必须为整数'}), 400
+    if days < 1 or days > 365:
+        return jsonify({'error': 'days 需在 1-365 之间'}), 400
+
+    cutoff = time.time() - days * 86400
+    removed = []
+    for f in DATA_DIR.glob('progress_*.json'):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed.append(f.name)
+        except Exception:
+            pass
+    logger.info(f"清理 {len(removed)} 个超过 {days} 天的进度文件")
+    return jsonify({'ok': True, 'removed': len(removed), 'files': removed[:50], 'days': days})
+
+
+@app.route('/api/clear-progress/<paper_id>', methods=['POST'])
+def clear_progress(paper_id):
+    """清除指定题库的进度文件（用于重试）"""
+    paper_id, err = validate_paper_id(paper_id)
+    if err:
+        return jsonify({'error': err}), 400
+    removed = 0
+    for f in DATA_DIR.glob(f'progress_{paper_id}*.json'):
+        try:
+            f.unlink()
+            removed += 1
+        except Exception:
+            pass
+    logger.info(f"清除题库 {paper_id} 进度: 删除 {removed} 个文件")
+    return jsonify({'ok': True, 'removed': removed})
+
+
+@app.route('/api/history')
+def history():
+    """获取已爬取过的题库历史（基于 progress 文件）"""
+    history_list = []
+    for f in DATA_DIR.glob('progress_*.json'):
+        name = f.name
+        if '_seg' in name:
+            continue
+        m = re.match(r'progress_(\d+)(.*)\.json', name)
+        if not m:
+            continue
+        paper_id = m.group(1)
+        suffix = m.group(2)
+        try:
+            with open(f, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            count = len(data)
+            has_answer = sum(1 for q in data if q.get('正确答案'))
+        except Exception:
+            count = 0
+            has_answer = 0
+        history_list.append({
+            'paper_id': paper_id,
+            'mode_suffix': suffix,
+            'count': count,
+            'has_answer': has_answer,
+            'mtime': f.stat().st_mtime,
+        })
+    history_list.sort(key=lambda x: x['mtime'], reverse=True)
+    return jsonify(history_list)
+
+
+@app.route('/api/export/<paper_id>', methods=['GET'])
+def export_paper(paper_id):
+    """从已保存进度导出为指定格式（csv/json/xlsx）"""
+    paper_id, err = validate_paper_id(paper_id)
+    if err:
+        return jsonify({'error': err}), 400
+    fmt = (request.args.get('format') or 'xlsx').lower()
+    if fmt not in ('xlsx', 'csv', 'json'):
+        return jsonify({'error': '不支持的格式，可选 xlsx/csv/json'}), 400
+
+    questions = load_progress(paper_id)
+    if not questions:
+        return jsonify({'error': f'题库 {paper_id} 无进度数据，请先爬取'}), 404
+
+    ext = fmt
+    filename = f"考试宝题库_{paper_id}.{ext}"
+    filepath = OUTPUT_DIR / filename
+    try:
+        export_questions(questions, str(filepath), fmt=fmt)
+    except Exception as e:
+        logger.exception(f"导出失败: {e}")
+        return jsonify({'error': f'导出失败: {e}'}), 500
+    return send_file(filepath, as_attachment=True, download_name=filename)
+
+
+def _build_openapi_spec() -> dict:
+    """构建 OpenAPI 3.0 规范（替代手动维护的文档列表）"""
+    return {
+        'openapi': '3.0.0',
+        'info': {
+            'title': '考试宝题库爬取API',
+            'version': '1.0.0',
+            'description': '通过Chrome已登录会话爬取考试宝题库的Web API'
+        },
+        'paths': {
+            '/': {'get': {'summary': 'Web界面', 'responses': {'200': {'description': 'HTML页面'}}}},
+            '/health': {'get': {'summary': '健康检查', 'responses': {'200': {'description': '服务健康'}, '503': {'description': '服务不健康'}}}},
+            '/manifest.json': {'get': {'summary': 'PWA manifest', 'responses': {'200': {'description': 'manifest JSON'}}}},
+            '/api/docs': {'get': {'summary': 'API文档(OpenAPI规范)', 'responses': {'200': {'description': 'OpenAPI spec'}}}},
+            '/api/stats': {'get': {'summary': '监控指标', 'responses': {'200': {'description': '统计信息'}}}},
+            '/api/history': {'get': {'summary': '已爬取题库历史', 'responses': {'200': {'description': '历史列表'}}}},
+            '/api/chrome-status': {'get': {'summary': 'Chrome调试端口状态', 'responses': {'200': {'description': '状态信息'}}}},
+            '/api/chrome-start': {'post': {'summary': '启动Chrome调试模式', 'responses': {'200': {'description': '启动结果'}, '429': {'description': '操作太频繁'}}}},
+            '/api/tasks': {'get': {'summary': '获取所有任务状态', 'responses': {'200': {'description': '任务列表'}}}},
+            '/api/start': {'post': {'summary': '启动单个爬取任务', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'paper_id': {'type': 'string'}, 'mode': {'type': 'string', 'enum': ['ocr', 'dom', 'hybrid', 'race']}}}}}}, 'responses': {'200': {'description': '任务已启动'}, '400': {'description': '参数错误'}}}},
+            '/api/stop/{task_id}': {'post': {'summary': '停止任务', 'parameters': [{'name': 'task_id', 'in': 'path', 'required': True, 'schema': {'type': 'string', 'pattern': '^[a-f0-9]{8}$'}}], 'responses': {'200': {'description': '已停止'}, '400': {'description': '无效task_id'}}}},
+            '/api/remove/{task_id}': {'post': {'summary': '移除已完成任务', 'parameters': [{'name': 'task_id', 'in': 'path', 'required': True, 'schema': {'type': 'string', 'pattern': '^[a-f0-9]{8}$'}}], 'responses': {'200': {'description': '已移除'}, '400': {'description': '无效task_id'}}}},
+            '/api/files': {'get': {'summary': '列出Excel文件', 'responses': {'200': {'description': '文件列表'}}}},
+            '/api/download/{filename}': {'get': {'summary': '下载Excel文件', 'parameters': [{'name': 'filename', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}], 'responses': {'200': {'description': '文件内容'}, '404': {'description': '文件不存在'}}}},
+            '/api/export/{paper_id}': {'get': {'summary': '导出为xlsx/csv/json', 'parameters': [{'name': 'paper_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}, {'name': 'format', 'in': 'query', 'schema': {'type': 'string', 'enum': ['xlsx', 'csv', 'json']}}], 'responses': {'200': {'description': '导出文件'}, '404': {'description': '无数据'}}}},
+            '/api/delete-file': {'post': {'summary': '删除单个文件', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}}}}}, 'responses': {'200': {'description': '已删除'}}}},
+            '/api/delete-files': {'post': {'summary': '批量删除文件', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'names': {'type': 'array', 'items': {'type': 'string'}}}}}}}, 'responses': {'200': {'description': '删除结果'}}}},
+            '/api/batch-start': {'post': {'summary': '批量启动任务', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'ids': {'type': 'array', 'items': {'type': 'string'}}}}}}}, 'responses': {'200': {'description': '批量启动结果'}}}},
+            '/api/start-parallel': {'post': {'summary': '分段并行爬取', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'paper_id': {'type': 'string'}, 'total_questions': {'type': 'integer'}, 'workers': {'type': 'integer'}}}}}}, 'responses': {'200': {'description': '已启动'}, '400': {'description': '参数错误'}}}},
+            '/api/merge-segments': {'post': {'summary': '合并分段结果', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'paper_id': {'type': 'string'}, 'workers': {'type': 'integer'}}}}}}, 'responses': {'200': {'description': '合并结果'}, '400': {'description': '参数错误'}}}},
+            '/api/clear-progress/{paper_id}': {'post': {'summary': '清除题库进度', 'parameters': [{'name': 'paper_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}], 'responses': {'200': {'description': '已清除'}}}},
+            '/api/cleanup': {'post': {'summary': '清理旧进度文件', 'requestBody': {'content': {'application/json': {'schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}}}}, 'responses': {'200': {'description': '清理结果'}}}},
+        }
+    }
+
+
+@app.route('/api/docs')
+def api_docs():
+    """API 文档端点：返回 OpenAPI 3.0 规范"""
+    return jsonify(_build_openapi_spec())
+
+
+@app.route('/manifest.json')
+def manifest():
+    return jsonify({
+        'name': '考试宝题库爬取工具',
+        'short_name': '考试宝爬取',
+        'description': '通过Chrome已登录会话爬取考试宝题库',
+        'start_url': '/',
+        'display': 'standalone',
+        'background_color': '#f0f2f5',
+        'theme_color': '#4a90d9',
+        'icons': [
+            {'src': 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22120%22 height=%2264%22 rx=%2212%22 fill=%22%234a90d9%22/%3E%3C/svg%3E', 'sizes': '64x64', 'type': 'image/svg+xml'}
+        ]
+    })
+
+
+@app.route('/health')
+def health_check():
+    """健康检查端点（用于 Docker / 负载均衡 / 监控）"""
+    chrome_ok = get_chrome_status()
+    with tasks_lock:
+        running = sum(1 for t in tasks.values() if t['running'])
+        total = len(tasks)
+        failed = sum(1 for t in tasks.values() if t.get('error') and not t['running'])
+    return jsonify({
+        'status': 'healthy',
+        'ready': chrome_ok,
+        'chrome': 'online' if chrome_ok else 'offline',
+        'tasks_running': running,
+        'tasks_total': total,
+        'tasks_failed': failed,
+        'uptime': int(time.time() - _start_time)
+    }), 200
+
+
+@app.route('/api/stats')
+def stats():
+    """监控指标端点"""
+    with tasks_lock:
+        running = sum(1 for t in tasks.values() if t['running'])
+        done = sum(1 for t in tasks.values() if t['phase'] == 'done')
+        error = sum(1 for t in tasks.values() if t['phase'] == 'error')
+        total = len(tasks)
+    try:
+        file_count = sum(1 for _ in OUTPUT_DIR.glob('*.xlsx'))
+    except Exception:
+        file_count = 0
+    return jsonify({
+        'tasks': {'running': running, 'done': done, 'error': error, 'total': total, 'max': MAX_TASKS},
+        'files': file_count,
+        'chrome_online': get_chrome_status(),
+        'uptime': int(time.time() - _start_time)
+    })
+
+try:
+    from db_store import init_db, is_db_configured
+    if is_db_configured():
+        init_db()
+        logger.info("PostgreSQL存储层已启用")
+    else:
+        logger.info("PostgreSQL未配置，使用文件存储")
+except Exception as e:
+    logger.warning(f"数据库模块加载失败: {e}")
 
 
 if __name__ == '__main__':

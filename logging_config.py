@@ -85,10 +85,12 @@ def get_logger(name: str = "kaoshibao") -> logging.Logger:
 # 初始化默认logger
 _logger = None
 
-def init_default_logger(log_dir: Path = None, level: str = "INFO") -> logging.Logger:
+def init_default_logger(log_dir: Path = None, level: str = None) -> logging.Logger:
     """初始化默认logger（应用启动时调用一次）"""
     global _logger
+    if level is None:
+        level = os.environ.get('LOG_LEVEL', 'INFO')
     if log_dir is None:
-        log_dir = Path.home() / "Desktop" / "kaoshibao" / "logs"
+        log_dir = Path(__file__).parent / "logs"
     _logger = setup_logging("kaoshibao", level, log_dir)
     return _logger
