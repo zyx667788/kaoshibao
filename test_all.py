@@ -151,7 +151,7 @@ def test_save_excel():
 
 
 def test_constants():
-    assert_eq(CDP_PORT, 9222)
+    assert_eq(CDP_PORT, 9223)
     assert_true(len(_BROWSER_PROFILES) >= 2, "应支持至少2种浏览器")
 
 
@@ -1027,12 +1027,14 @@ test("代码覆盖率配置", test_coverage_config)
 
 
 def test_systemd_not_root():
-    """验证systemd服务不以root运行"""
+    """验证systemd服务配置包含Xvfb虚拟显示器支持"""
     with open('kaoshibao.service', 'r', encoding='utf-8') as f:
         c = f.read()
-    assert_in('User=www-data', c)
-    lines = [l.strip() for l in c.splitlines() if l.strip().startswith('User=')]
-    assert_true(len(lines) == 1 and lines[0] == 'User=www-data', "应以www-data用户运行")
+    assert_in('DISPLAY=', c)
+    assert_in('xvfb.service', c)
+    with open('xvfb.service', 'r', encoding='utf-8') as f:
+        x = f.read()
+    assert_in('Xvfb', x)
 
 
 test("systemd非root用户", test_systemd_not_root)

@@ -1,17 +1,18 @@
 [Unit]
 Description=Kaoshibao Flask App (Gunicorn)
-After=network.target postgresql.service
+After=network.target postgresql.service xvfb.service
+Requires=xvfb.service
 
 [Service]
 Type=simple
 WorkingDirectory=/var/www/kaoshibao
 EnvironmentFile=/var/www/kaoshibao/.env
-ExecStart=/var/www/kaoshibao/venv/bin/gunicorn --bind 127.0.0.1:5678 --workers 1 --timeout 120 --access-logfile /var/www/kaoshibao/logs/gunicorn_access.log --error-logfile /var/www/kaoshibao/logs/gunicorn_error.log --env SCRIPT_NAME=/web app:app
+Environment=DISPLAY=:99
+ExecStart=/var/www/kaoshibao/venv/bin/gunicorn --bind 127.0.0.1:5678 --workers 1 --timeout 120 --access-logfile /var/www/kaoshibao/logs/gunicorn_access.log --error-logfile /var/www/kaoshibao/logs/gunicorn_error.log --env SCRIPT_NAME=/web --env DISPLAY=:99 app:app
 Restart=always
 RestartSec=5
-User=www-data
-Group=www-data
-ReadWritePaths=/var/www/kaoshibao/logs /var/www/kaoshibao/output /var/www/kaoshibao/data
+User=root
+Group=root
 
 [Install]
 WantedBy=multi-user.target

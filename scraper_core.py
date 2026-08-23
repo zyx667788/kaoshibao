@@ -10,8 +10,15 @@ import subprocess
 import sys
 import io
 import time
+import sys
 import socket
+import subprocess
+import time
+import re
+import json
 import os
+import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 from openpyxl import Workbook
@@ -48,30 +55,57 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-CDP_PORT = 9222
+CDP_PORT = int(os.environ.get("CDP_PORT", "9223"))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
-# 支持的浏览器列表（按优先级排序：优先检测正在运行的）
-_BROWSER_PROFILES = [
-    {
-        'name': '360浏览器',
-        'process': '360ChromeX.exe',
-        'exe_path': str(Path.home() / "AppData/Local/360ChromeX/Chrome/Application/360ChromeX.exe"),
-        'user_data': str(Path.home() / "AppData/Local/360ChromeX/Chrome/User Data"),
-    },
-    {
-        'name': 'Google Chrome',
-        'process': 'chrome.exe',
-        'exe_path': r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        'user_data': str(Path.home() / "AppData/Local/Google/Chrome/User Data"),
-    },
-    {
-        'name': 'Edge',
-        'process': 'msedge.exe',
-        'exe_path': r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        'user_data': str(Path.home() / "AppData/Local/Microsoft/Edge/User Data"),
-    },
-]
+# 支持的浏览器列表（按优先级排序，根据平台自动选择）
+if sys.platform == 'win32':
+    _BROWSER_PROFILES = [
+        {
+            'name': '360浏览器',
+            'process': '360ChromeX.exe',
+            'exe_path': str(Path.home() / "AppData/Local/360ChromeX/Chrome/Application/360ChromeX.exe"),
+            'user_data': str(Path.home() / "AppData/Local/360ChromeX/Chrome/User Data"),
+        },
+        {
+            'name': 'Google Chrome',
+            'process': 'chrome.exe',
+            'exe_path': r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            'user_data': str(Path.home() / "AppData/Local/Google/Chrome/User Data"),
+        },
+        {
+            'name': 'Edge',
+            'process': 'msedge.exe',
+            'exe_path': r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            'user_data': str(Path.home() / "AppData/Local/Microsoft/Edge/User Data"),
+        },
+    ]
+else:
+    _pw_chrome = str(Path.home() / ".cache/ms-playwright")
+    _pw_chrome_path = ''
+    for p in sorted(Path(_pw_chrome).glob('chromium-*/chrome-linux64/chrome'), reverse=True):
+        _pw_chrome_path = str(p)
+        break
+    _BROWSER_PROFILES = [
+        {
+            'name': 'Google Chrome',
+            'process': 'chrome',
+            'exe_path': '/usr/bin/google-chrome',
+            'user_data': str(Path.home() / ".config/google-chrome"),
+        },
+        {
+            'name': 'Chromium',
+            'process': 'chromium',
+            'exe_path': '/usr/bin/chromium',
+            'user_data': str(Path.home() / ".config/chromium"),
+        },
+        {
+            'name': 'Playwright Chromium',
+            'process': 'chrome',
+            'exe_path': _pw_chrome_path or '/usr/bin/chromium',
+            'user_data': str(Path.home() / ".config/chromium"),
+        },
+    ]
 
 
 def is_port_open(port: int, host: str = '127.0.0.1') -> bool:
@@ -84,14 +118,22 @@ def _detect_browser():
     """检测当前正在运行的Chromium浏览器，返回浏览器配置或None"""
     for browser in _BROWSER_PROFILES:
         try:
-            r = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {browser['process']}", "/NH"],
-                capture_output=True, text=True, timeout=5
-            )
-            if browser['process'].lower() in r.stdout.lower():
-                # 验证exe路径存在
-                if Path(browser['exe_path']).exists():
-                    return browser
+            if sys.platform == 'win32':
+                r = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {browser['process']}", "/NH"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if browser['process'].lower() not in r.stdout.lower():
+                    continue
+            else:
+                r = subprocess.run(
+                    ["pgrep", "-x", browser['process']],
+                    capture_output=True, text=True, timeout=5
+                )
+                if r.returncode != 0:
+                    continue
+            if Path(browser['exe_path']).exists():
+                return browser
         except Exception:
             continue
     return None
@@ -107,13 +149,16 @@ def _detect_any_installed_browser():
 
 def _start_browser_with_debug(browser):
     """以调试模式启动指定浏览器"""
-    subprocess.Popen([
+    cmd = [
         browser['exe_path'],
         f"--remote-debugging-port={CDP_PORT}",
         "--no-first-run",
         "--no-default-browser-check",
         f"--user-data-dir={browser['user_data']}",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ]
+    if sys.platform != 'win32':
+        cmd.extend(["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"])
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):
         time.sleep(1)
         if is_port_open(CDP_PORT):
@@ -135,8 +180,12 @@ def ensure_chrome_debug():
 
     if running_browser:
         # 有浏览器在运行但没开调试端口，需要重启
-        subprocess.run(["taskkill", "/F", "/IM", running_browser['process']],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys.platform == 'win32':
+            subprocess.run(["taskkill", "/F", "/IM", running_browser['process']],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["pkill", "-f", running_browser['process']],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
         ok = _start_browser_with_debug(running_browser)
         if ok:
