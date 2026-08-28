@@ -284,8 +284,8 @@
                             并行数
                             <select id="workerCount" style="padding:2px 6px;border:1px solid #d9d9d9;border-radius:4px;">
                                 <option value="2">2</option>
-                                <option value="3">3</option>
-                                <option value="4" selected>4</option>
+                                <option value="3" selected>3</option>
+                                <option value="4">4</option>
                                 <option value="5">5</option>
                             </select>
                         </label>
@@ -649,7 +649,7 @@
                 let res = await fetch(window.__p+'/api/start-parallel', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ paper_id: paperId, total_questions: totalQ, workers: workers })
+                    body: JSON.stringify({ paper_id: paperId, total_questions: totalQ, workers: workers, mode: document.getElementById('readMode').value })
                 });
                 let data = await res.json();
                 if (data.ok) {

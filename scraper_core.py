@@ -88,6 +88,12 @@ else:
         break
     _BROWSER_PROFILES = [
         {
+            'name': 'Playwright Chromium',
+            'process': 'chrome',
+            'exe_path': _pw_chrome_path or '/usr/bin/chromium',
+            'user_data': str(Path.home() / ".config/chromium"),
+        },
+        {
             'name': 'Google Chrome',
             'process': 'chrome',
             'exe_path': '/usr/bin/google-chrome',
@@ -97,12 +103,6 @@ else:
             'name': 'Chromium',
             'process': 'chromium',
             'exe_path': '/usr/bin/chromium',
-            'user_data': str(Path.home() / ".config/chromium"),
-        },
-        {
-            'name': 'Playwright Chromium',
-            'process': 'chrome',
-            'exe_path': _pw_chrome_path or '/usr/bin/chromium',
             'user_data': str(Path.home() / ".config/chromium"),
         },
     ]
@@ -228,7 +228,7 @@ def get_chrome_status():
 async def open_cdp_page(playwright):
     """通过CDP连接Chrome并打开新标签页，返回 (browser, page)，失败返回 (None, None)"""
     try:
-        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        browser = await playwright.chromium.connect_over_cdp(CDP_URL, timeout=15000)
         if not browser.contexts:
             return None, None
         context = browser.contexts[0]
@@ -465,31 +465,30 @@ async def get_current_question_dom(page) -> dict | None:
 
 
 async def get_current_question_hybrid(page) -> dict | None:
-    """混合模式：DOM读结构 + OCR只读题目文本（速度和质量平衡）"""
-    from PIL import Image, ImageOps, ImageEnhance
-
-    # 先用DOM获取结构
+    """混合模式：DOM读结构+题目，OCR仅当DOM题目为空时兜底（速度快，质量好）"""
     dom_data = await get_current_question_dom(page)
 
-    # 只对题目文本用OCR
-    question = ''
-    try:
-        qEl = await page.query_selector('.qusetion-title')
-        if qEl:
-            box = await qEl.bounding_box()
-            if box and box['width'] > 10:
-                img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'hybrid_q.png')
-                await page.screenshot(path=img_path, clip={
-                    'x': box['x'] - 5, 'y': box['y'] - 5,
-                    'width': box['width'] + 10, 'height': box['height'] + 10,
-                })
-                question = await _ocr_file(img_path)
-    except Exception:
-        pass
-
-    # 如果OCR失败，用DOM文本兜底
+    # 题目优先用DOM读取（快、无OCR误差），DOM为空时再用OCR兜底
+    question = dom_data.get('question', '').strip()
     if not question or len(question) < 5:
-        question = dom_data.get('question', '')
+        from PIL import Image, ImageOps, ImageEnhance
+        try:
+            qEl = await page.query_selector('.qusetion-title')
+            if qEl:
+                box = await qEl.bounding_box()
+                if box and box['width'] > 10:
+                    img_path = os.path.join(os.environ.get('TEMP', '/tmp'), 'hybrid_q.png')
+                    await page.screenshot(path=img_path, clip={
+                        'x': box['x'] - 5, 'y': box['y'] - 5,
+                        'width': box['width'] + 10, 'height': box['height'] + 10,
+                    })
+                    ocr_q = await _ocr_file(img_path)
+                    if ocr_q and len(ocr_q) >= 5:
+                        question = ocr_q
+        except Exception:
+            pass
+        if not question or len(question) < 5:
+            question = dom_data.get('question', '')
 
     dom_data['question'] = question
     return dom_data
@@ -1072,8 +1071,10 @@ async def _init_recite_mode(page, log_fn=None) -> bool:
     return True
 
 
-async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check) -> str:
-    """导航到练习页面，返回状态：ok/auth_error"""
+async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check, new_page_holder=None) -> str:
+    """导航到练习页面，返回状态：ok/auth_error
+    new_page_holder: dict，若练习在新标签页打开，将 {'page': new_page} 放入其中"""
+
     def log(msg):
         if log_fn:
             log_fn(msg)
@@ -1108,35 +1109,67 @@ async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_che
         await asyncio.sleep(3)
         await close_popups(page)
     else:
-        log("页面诊断:")
-        await dump_page_info(page, log_fn)
-        paper_url = page.url
-        log("点击顺序练习...")
-        clicked = await page.evaluate('''() => {
-            const allItems = document.querySelectorAll('a.item, a[href="javascript:;"]');
-            for (const a of allItems) {
-                if (a.innerText?.includes('顺序练习')) {
-                    ['mousedown', 'mouseup', 'click'].forEach(type => {
-                        a.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                    });
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        log(f"  点击结果: {clicked}")
-        for wait_i in range(10):
-            await asyncio.sleep(1)
-            if page.url != paper_url:
-                break
+        practice_url = (
+            f'https://www.kaoshibao.com/online/?paperId={paper_id}'
+            f'&practice=&modal=1&type=qtype_random&is_recite=&qtype='
+            f'&text=顺序练习&sequence=0'
+            f'&is_collect=1&is_vip_paper=0&gid=&is_buy=1'
+            f'&qtype_random_index=0'
+        )
+        log("直接访问练习页面...")
+        await navigate_with_retry(page, practice_url)
+        await asyncio.sleep(3)
         await close_popups(page)
-        if page.url == paper_url:
-            log("  URL未变化，尝试直接访问练习页面...")
-            practice_url = await find_practice_url(page, paper_id, log_fn)
-            if practice_url:
-                await navigate_with_retry(page, practice_url)
-                await asyncio.sleep(2)
-                await close_popups(page)
+        if not await wait_for_question(page, timeout=8):
+            # 直接访问未加载题目，回退到点击顺序练习（含新标签页捕获）
+            log("直接访问未加载题目，点击顺序练习...")
+            paper_url = page.url
+            captured_pages = []
+            if new_page_holder is not None:
+                async def _on_new(pg):
+                    try:
+                        captured_pages.append(pg)
+                    except Exception:
+                        pass
+                page.context.on('page', _on_new)
+            clicked = await page.evaluate('''() => {
+                const allItems = document.querySelectorAll('a.item, a[href="javascript:;"]');
+                for (const a of allItems) {
+                    if (a.innerText?.includes('顺序练习')) {
+                        ['mousedown', 'mouseup', 'click'].forEach(type => {
+                            a.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                        });
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+            log(f"  点击结果: {clicked}")
+            new_page = None
+            for wait_i in range(10):
+                await asyncio.sleep(1)
+                if captured_pages:
+                    new_page = captured_pages[0]
+                    break
+                if page.url != paper_url:
+                    break
+            if new_page is not None:
+                log(f"  练习在新标签页打开: {new_page.url}")
+                if new_page_holder is not None:
+                    new_page_holder['page'] = new_page
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                return 'ok'
+            await close_popups(page)
+            if page.url == paper_url:
+                log("  URL未变化，尝试直接访问练习页面...")
+                practice_url2 = await find_practice_url(page, paper_id, log_fn)
+                if practice_url2:
+                    await navigate_with_retry(page, practice_url2)
+                    await asyncio.sleep(2)
+                    await close_popups(page)
         if await check_login_required(page):
             log("进入练习页后需要登录...")
             logged_in = await wait_for_login(page, log_fn, stop_check)
@@ -1157,9 +1190,21 @@ async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_che
 
 
 def _is_valid_question_text(q_text: str) -> bool:
-    """判断题目文本是否有效：至少10字符，包含中文，不全是噪音"""
+    """判断题目文本是否有效：至少10字符，包含中文，不全是噪音，且非页面提示/垃圾内容"""
     has_chinese = bool(re.search(r'[一-鿿]', q_text))
-    return len(q_text) >= 10 and has_chinese and not re.match(r'^[a-z0-9.\s]+$', q_text.lower())
+    if not (len(q_text) >= 10 and has_chinese):
+        return False
+    if re.match(r'^[a-z0-9.\s]+$', q_text.lower()):
+        return False
+    # 过滤页面提示、AI解析说明等非题目内容
+    noise_markers = [
+        '请先点击上方设置按钮', '关闭AI解析', '随时生成的文字',
+        '本解析由AI', '原解析', 'AI解析', '获取深度解题', '深度解题',
+        '上方设置', '点击上方',
+    ]
+    if any(m in q_text for m in noise_markers):
+        return False
+    return True
 
 
 def _add_question_if_new(data: dict[str, Any], questions: list, existing_keys: set,
@@ -1180,7 +1225,10 @@ def _add_question_if_new(data: dict[str, Any], questions: list, existing_keys: s
     if progress_fn:
         has_ans = sum(1 for q in questions if q.get('正确答案'))
         progress_fn(len(questions), has_ans)
-    save_progress(paper_id, questions, suffix=f'_{mode}' if mode and mode != 'ocr' else '')
+    try:
+        save_progress(paper_id, questions, suffix=f'_{mode}' if mode and mode != 'ocr' else '')
+    except Exception:
+        pass
     return True
 
 
@@ -1214,7 +1262,8 @@ async def _recover_page(page, paper_id, questions: list, log_fn=None) -> bool:
 
 
 async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progress_fn=None,
-                           start_sequence=0, max_questions=0, mode='ocr') -> tuple[list[dict[str, Any]], str]:
+                           start_sequence=0, max_questions=0, mode='ocr',
+                           existing_questions=None, repeat_limit=10) -> tuple[list[dict[str, Any]], str]:
     """
     背题模式下收集所有题目+答案+解析
 
@@ -1226,9 +1275,14 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
         progress_fn: 进度回调 fn(collected, with_answer)
         start_sequence: 起始题目序号（用于分段并行）
         max_questions: 最多收集题目数（0=不限）
+        existing_questions: 已有进度（用于去重，仅新增缺失题）
     """
     questions = []
     existing_keys = set()
+    if existing_questions:
+        questions = list(existing_questions)
+        for q in questions:
+            existing_keys.add(str(q.get('题目', ''))[:80])
 
     def log(msg):
         if log_fn:
@@ -1236,7 +1290,10 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
         logger.info(msg)
 
     try:
-        status = await _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check)
+        np_holder = {}
+        status = await _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check, new_page_holder=np_holder)
+        if np_holder.get('page'):
+            page = np_holder['page']
         if status != 'ok':
             return questions, status
 
@@ -1247,15 +1304,18 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
         consecutive_failures = 0
         no_new_count = 0
         last_success_i = 0  # 上次成功收集的迭代编号
+        normal_end = False  # 是否正常结束（达上限/用户停止）
 
         for i in range(10000):
             if stop_check and stop_check():
                 log("用户请求停止")
+                normal_end = True
                 break
 
             # 分段模式：达到最大题数后停止
             if max_questions > 0 and len(questions) >= max_questions:
                 log(f"已达到分段上限 {max_questions} 题，停止收集")
+                normal_end = True
                 break
 
             # 检查登录是否过期
@@ -1300,6 +1360,18 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                     data = await get_current_question(page, mode=mode)
                     if _is_valid_question_text(data.get('question', '')):
                         consecutive_failures = 0
+                # 无效题目可能是考试宝插入的提示/广告题，点击"下一题"跳过
+                if consecutive_failures >= 4:
+                    log(f"题目文本无效已连续{consecutive_failures}次，点击下一题跳过...")
+                    skipped = await click_next_question(page)
+                    consecutive_failures = 0
+                    if not skipped:
+                        await asyncio.sleep(2)
+                        skipped = await click_next_question(page)
+                    if not skipped:
+                        break
+                    continue
+                await asyncio.sleep(2)
                 if consecutive_failures >= 20:
                     log("连续20次无法读取有效题目，尝试恢复...")
                     if await _recover_page(page, paper_id, questions, log_fn):
@@ -1307,7 +1379,6 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                         continue
                     else:
                         break
-                await asyncio.sleep(1)
                 continue
             consecutive_failures = 0
 
@@ -1322,8 +1393,8 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 last_success_i = i
             else:
                 no_new_count += 1
-                if no_new_count >= 10:
-                    log("连续10题重复，可能已到末尾")
+                if no_new_count >= repeat_limit:
+                    log(f"连续{repeat_limit}题重复，可能已到末尾")
                     break
 
             # 定期日志
@@ -1349,6 +1420,11 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
 
         has_ans = sum(1 for q in questions if q.get('正确答案'))
         log(f"完成: {len(questions)} 题, 有答案 {has_ans} 题")
+
+        # 分段模式：未达上限且非正常结束（翻题失败/恢复失败等），标记 error 触发重试
+        if max_questions > 0 and not normal_end and len(questions) < max_questions:
+            log(f"分段未达上限: 已收集 {len(questions)}/{max_questions} 题，标记为需重试")
+            return questions, 'error'
 
     except Exception as e:
         log(f"出错: {e}")

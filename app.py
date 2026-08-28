@@ -132,6 +132,9 @@ _start_time = time.time()
 tasks = {}
 tasks_lock = threading.Lock()
 
+# 全局Chrome操作锁：串行化所有任务的Chrome CDP操作，避免多任务并发连接/翻页互相干扰
+_chrome_lock = threading.Lock()
+
 # 速率限制
 _rate_limit = {}
 _rate_limit_lock = threading.Lock()
@@ -261,7 +264,7 @@ def _finalize_task_success(task, questions, is_segment, paper_id, segment_id, mo
 
 
 async def _do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max_questions, mode, questions):
-    """执行异步爬取"""
+    """执行异步爬取，返回 (questions, status)，status: ok/auth_error/error"""
     from playwright.async_api import async_playwright
     label = f"分段{segment_id}" if is_segment else ""
     task_log(task, f"连接Chrome{'('+label+')' if is_segment else ''}...")
@@ -271,7 +274,7 @@ async def _do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max
             task_log(task, "无法连接Chrome，请确保Chrome已启动并登录考试宝")
             task['phase'] = 'error'
             task['message'] = '无法连接Chrome'
-            return questions
+            return questions, 'error'
         try:
             task_log(task, "已连接Chrome，打开新标签页")
             task['phase'] = 'collect'
@@ -305,18 +308,18 @@ async def _do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max
             if status == 'auth_error':
                 task['phase'] = 'error'
                 task['message'] = '登录超时或已取消，请在Chrome中登录考试宝后重试'
-                return questions
+                return questions, 'auth_error'
 
             if result:
                 added = _merge_questions(result, questions)
                 task_log(task, f"新增 {added} 题，总计 {len(questions)} 题")
             else:
                 task_log(task, "未收集到新题目，保留已有数据")
-            return questions
+            return questions, status
         except Exception as e:
             logger.exception(f"爬取出错: {e}")
             task_log(task, f"爬取出错: {e}")
-            return questions
+            return questions, 'error'
         finally:
             try:
                 await page.close()
@@ -351,7 +354,42 @@ def run_task(task_id):
     asyncio.set_event_loop(loop)
 
     try:
-        loop.run_until_complete(_do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max_questions, mode, questions))
+        from contextlib import nullcontext
+        with (nullcontext() if is_segment else _chrome_lock):
+            max_retries = 3
+            status = 'error'
+            for attempt in range(max_retries):
+                if task.get('stop_requested'):
+                    break
+                if attempt > 0:
+                    task_log(task, f"第 {attempt+1} 次尝试（重连Chrome）...")
+                    task['started_at'] = 0
+                    time.sleep(3)
+                _result, status = loop.run_until_complete(
+                    _do_scrape(task, paper_id, segment_id, is_segment, start_sequence, max_questions, mode, questions))
+                if status == 'ok' and questions:
+                    break
+                if status == 'auth_error':
+                    break
+                if questions:
+                    break
+                if attempt < max_retries - 1:
+                    task_log(task, f"第 {attempt+1} 次未成功，稍后重试...")
+        if status != 'ok' or not questions:
+            task['running'] = False
+            task['phase'] = 'error'
+            if status == 'auth_error':
+                task['message'] = '登录超时或已取消，请在Chrome中登录考试宝后重试'
+            else:
+                task['message'] = f'爬取失败（{status}），已收集 {len(questions)} 题'
+            task_log(task, f"爬取未完成（{status}），已收集 {len(questions)} 题")
+            return
+        if not questions:
+            task['running'] = False
+            task['phase'] = 'error'
+            task['message'] = '未收集到任何题目，请检查登录状态后重试'
+            task_log(task, "未收集到任何题目")
+            return
         _finalize_task_success(task, questions, is_segment, paper_id, segment_id, mode_suffix, output_file)
     except Exception as e:
         logger.exception(f"任务执行错误: {e}")
@@ -497,8 +535,19 @@ def start_task():
             if t['paper_id'] == paper_id and t['running']:
                 return jsonify({'error': f'题库 {paper_id} 正在爬取中'}), 400
 
+        segment_id = data.get('segment_id', -1)
+        start_sequence = data.get('start_sequence', 0)
+        max_questions = data.get('max_questions', 0)
+        if segment_id >= 0:
+            start_sequence = data.get('start_sequence', 0)
+            max_questions = data.get('max_questions', 0)
+
         task_id = str(uuid.uuid4())[:8]
-        task = new_task(paper_id, mode=mode)
+        task = new_task(
+            paper_id, segment_id=segment_id,
+            start_sequence=start_sequence, max_questions=max_questions,
+            mode=mode
+        )
         task['task_id'] = task_id
         tasks[task_id] = task
 
@@ -647,6 +696,10 @@ def start_parallel():
     if not isinstance(workers, int) or workers < 2 or workers > 5:
         return jsonify({'error': '并行数需在2-5之间'}), 400
 
+    mode = data.get('mode', 'hybrid')
+    if mode not in ('ocr', 'dom', 'hybrid'):
+        mode = 'hybrid'
+
     total_questions = data.get('total_questions', 702)
     if not isinstance(total_questions, int) or total_questions < 10:
         return jsonify({'error': '总题数需>=10'}), 400
@@ -655,6 +708,7 @@ def start_parallel():
         return jsonify({'error': 'Chrome未启动，请先启动Chrome'}), 400
 
     # 计算每段的题数和起始位置
+    from scraper_core import load_segment_progress
     seg_size = total_questions // workers
     segments = []
     for i in range(workers):
@@ -662,26 +716,39 @@ def start_parallel():
         count = seg_size if i < workers - 1 else total_questions - start
         segments.append({'segment_id': i, 'start_sequence': start, 'max_questions': count})
 
+    # 跳过已爬完整的分段（断点续爬，避免重复爬已完成的段）
+    active_segments = []
+    skipped = []
+    for seg in segments:
+        existing = load_segment_progress(paper_id, seg['segment_id'])
+        if len(existing) >= seg['max_questions']:
+            skipped.append(seg['segment_id'])
+            continue
+        active_segments.append(seg)
+    if not active_segments:
+        return jsonify({'ok': False, 'error': '所有分段均已爬完，无需重复爬取'}), 400
+
     with tasks_lock:
         running_count = sum(1 for t in tasks.values() if t['running'])
-        if running_count + workers > MAX_TASKS * 2:
+        if running_count + len(active_segments) > MAX_TASKS * 2:
             return jsonify({'error': f'当前运行任务过多，请稍后再试'}), 400
 
         task_ids = []
-        for seg in segments:
+        for seg in active_segments:
             task_id = str(uuid.uuid4())[:8]
             task = new_task(
                 paper_id,
                 segment_id=seg['segment_id'],
                 start_sequence=seg['start_sequence'],
-                max_questions=seg['max_questions']
+                max_questions=seg['max_questions'],
+                mode=mode
             )
             task['task_id'] = task_id
             task['message'] = f"分段{seg['segment_id']+1}/{workers}: 第{seg['start_sequence']+1}-{seg['start_sequence']+seg['max_questions']}题"
             tasks[task_id] = task
             task_ids.append(task_id)
 
-    # 启动所有分段任务
+    # 启动分段任务
     for tid in task_ids:
         thread = threading.Thread(target=run_task, args=(tid,), daemon=True)
         thread.start()
@@ -691,7 +758,8 @@ def start_parallel():
         'task_ids': task_ids,
         'paper_id': paper_id,
         'workers': workers,
-        'segments': segments
+        'skipped': skipped,
+        'segments': active_segments
     })
 
 

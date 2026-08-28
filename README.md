@@ -28,6 +28,22 @@
 - **OpenAPI 3.0** — 标准 API 规范，`/api/docs` 端点返回完整 spec
 - **CI/CD** — GitHub Actions 自动测试（多版本 Python）+ 代码覆盖率 + ruff lint
 
+## 界面预览
+
+Web 管理界面为响应式单页应用，支持暗色模式。以下为实际运行截图：
+
+**顶部功能区**（Chrome 状态、读取模式、题库 ID 输入、分段并行设置）：
+
+![顶部功能区](docs/screenshots/home_top.png)
+
+**完整界面**（任务列表 + 已生成文件管理）：
+
+![完整界面](docs/screenshots/home_full.png)
+
+**已生成文件管理**（搜索、排序、Excel/CSV/JSON 多格式导出）：
+
+![已生成文件管理](docs/screenshots/files_section.png)
+
 ## 快速开始
 
 ### 方式一：Docker 容器化部署
