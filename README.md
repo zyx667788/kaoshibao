@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Tests](https://img.shields.io/badge/Tests-112%20Passing-brightgreen)
-![Score](https://img.shields.io/badge/Score-9.4%2F10-blueviolet)
+![Score](https://img.shields.io/badge/Score-9.5%2F10-blueviolet)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&logoColor=white)
 
 自动爬取考试宝(kaoshibao.com)已购买题库的全部题目、选项、正确答案和解析，导出为格式化的 Excel 文件，同时支持 PostgreSQL 数据库存储。
@@ -17,7 +17,7 @@
 - **多任务并行** — 最多 5 个题库同时爬取，每个任务独立标签页、独立进度
 - **分段并行爬取** — 单个题库可拆分为 2-5 个分段并行爬取，速度提升 2-5 倍
 - **批量导入** — 一次输入多个题库 ID（最多 10 个），批量启动任务
-- **断点续传** — 每道题自动保存进度到 JSON，中断后可从断点继续
+- **断点续爬** — 每道题自动保存进度到 JSON，中断后可从断点继续；支持传入已有题目自动去重，重复容忍上限可调
 - **Web 可视化界面** — Flask 驱动的单页应用，实时进度条、日志、文件管理
 - **命令行模式** — 支持 `python scrape.py <ID>` 直接运行
 - **反字体反爬** — 通过 OCR 截图识别绕过考试宝的自定义字体混淆机制
@@ -43,6 +43,10 @@ Web 管理界面为响应式单页应用，支持暗色模式。以下为实际�
 **已生成文件管理**（搜索、排序、Excel/CSV/JSON 多格式导出）：
 
 ![已生成文件管理](docs/screenshots/files_section.png)
+
+**服务器实际运行**（部署于腾讯云，nginx 反向代理，任务收集中实时进度）：
+
+![服务器实际运行](docs/screenshots/server_home.png)
 
 ## 快速开始
 
@@ -104,6 +108,14 @@ kaoshibao/
 ├── test_all.py                   # 测试套件（112 个测试用例）
 ├── templates/
 │   └── index.html                # Web 单页应用（响应式 + 暗色模式）
+├── debug/                        # 运维/调试工具脚本
+│   ├── extract_cookies.py        # 迁移本地浏览器登录态到服务器 Chrome（CDP cookie 注入）
+│   ├── finalize_v2.py            # 历史版本 DP 匹配合并补全（多轮爬取结果合并去重）
+│   ├── target_scrape.py          # 针对性重爬指定题号并校验
+│   ├── scrape_standalone.py      # 独立断点续爬脚本（existing_questions 去重续爬）
+│   ├── verify_garbled.py         # 乱码校验
+│   ├── screenshot_pages.py       # 界面截图脚本（Playwright）
+│   └── start_local.py            # 本地服务启动脚本
 ├── .github/workflows/ci.yml      # CI/CD 流水线
 ├── .coveragerc                   # 代码覆盖率配置
 ├── .env.example                  # 环境变量示例
@@ -116,7 +128,7 @@ kaoshibao/
 ├── novnc.service                 # noVNC WebSocket 代理服务（Web 远程浏览器）
 ├── nginx_kaoshibao.conf          # nginx 反向代理配置（/web/ + /vnc/）
 ├── requirements.txt              # Python 依赖
-└── OPTIMIZATION.md               # 优化记录文档（9 轮 69 项）
+└── OPTIMIZATION.md               # 优化记录文档（11 轮 72 项）
 ```
 
 ## REST API
@@ -191,6 +203,35 @@ docker-compose up -d --build
 # 含健康检查、资源限制、非 root 用户、gunicorn
 ```
 
+## 常见问题排查
+
+### 部署到服务器后爬取一直 0%（服务器 Chrome 未登录）
+
+**现象**：部署后添加任务，题库页能打开但一直卡在「题目元素未找到，等待5秒后重试」，进度 0%，点暂停无响应。
+
+**根因**：服务器上的 Chrome 未登录考试宝账号。未登录时访问题库页只能看到购买/介绍页（含 `登录 注册 ¥xx.00 题库简介`），题目元素根本不存在，爬取永远找不到题目。
+
+**排查**：查看任务日志，若页面文本包含「登录 注册 购买价」即为未登录；也可用 Playwright 连接服务器 CDP（`127.0.0.1:9223`）打开考试宝首页，检查导航栏是否有「我的题库」（登录成功的标志）。
+
+**解决**：将本地已登录浏览器的考试宝登录态迁移到服务器 Chrome：
+
+```bash
+# 本地：从已登录浏览器提取 cookie（Playwright 连接本地 CDP 9223）
+python debug/extract_cookies.py        # 生成 debug/ksb_cookies.json
+# 上传到服务器
+scp debug/ksb_cookies.json root@<服务器IP>:/tmp/ksb_cookies.json
+# 服务器：注入 cookie 到服务器 Chrome 并验证
+#   connect_over_cdp("http://127.0.0.1:9223") → context.add_cookies() → 刷新 kaoshibao.com
+```
+
+注入后需在 Web 界面重新添加任务。
+
+**备选方案**：通过 noVNC 远程浏览器（`http://<服务器IP>:9007/vnc/vnc.html`）在服务器 Chrome 中手动登录考试宝。
+
+### 暂停任务无响应
+
+任务卡在「等待5秒重试」的阻塞循环中时，停止标志可能未及时打断阻塞中的页面操作，需等当前等待周期结束；若长时间无响应可刷新 Web 界面后重新添加任务。
+
 ## 运行测试
 
 ```bash
@@ -219,7 +260,7 @@ GitHub Actions 自动运行：
 
 ## 优化历程
 
-经过 9 轮共 69 项优化，综合评分从 6.5 提升至 9.4/10。详见 [OPTIMIZATION.md](OPTIMIZATION.md)。
+经过 11 轮共 72 项优化，综合评分从 6.5 提升至 9.5/10。详见 [OPTIMIZATION.md](OPTIMIZATION.md)。
 
 | 维度 | 初始 | 最终 |
 |------|------|------|
@@ -231,7 +272,7 @@ GitHub Actions 自动运行：
 | 可维护性 | 6.0 | 9.5 |
 | 部署运维 | 8.0 | 9.5 |
 | 性能 | 6.0 | 9.5 |
-| **综合** | **6.5** | **9.4** |
+| **综合** | **6.5** | **9.5** |
 
 ## 许可证
 
