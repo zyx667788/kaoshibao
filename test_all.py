@@ -49,6 +49,7 @@ from scraper_core import (
     load_progress, save_progress, OUTPUT_DIR, DATA_DIR,
     is_port_open, get_chrome_status, ensure_chrome_debug,
     open_cdp_page, CDP_PORT, _BROWSER_PROFILES,
+    BROWSER_PROFILE_ROOT, _set_practice_sequence, _extract_practice_paper_id,
     check_login_required, wait_for_question, click_next_question,
     navigate_with_retry
 )
@@ -78,6 +79,16 @@ def test_validate_url():
 def test_validate_url_no_slash():
     pid, err = validate_paper_id("https://www.kaoshibao.com/ti/9999")
     assert_eq(pid, "9999")
+
+
+def test_validate_e_classify_url():
+    pid, err = validate_paper_id("https://www.kaoshibao.com/e_classify/paper/103546")
+    assert_eq(pid, "103546")
+
+
+def test_validate_paper_info_url():
+    pid, err = validate_paper_id("https://www.kaoshibao.com/paperInfo/25126872")
+    assert_eq(pid, "25126872")
 
 
 def test_validate_bad_url():
@@ -155,6 +166,43 @@ def test_constants():
     assert_true(len(_BROWSER_PROFILES) >= 2, "应支持至少2种浏览器")
 
 
+def test_practice_sequence_update():
+    url = (
+        "https://www.kaoshibao.com/online/?paperId=25126989"
+        "&kid=103546&sequence=0&qtype_random_index=0"
+    )
+    updated = _set_practice_sequence(url, 42)
+    assert_in("sequence=42", updated)
+    assert_in("qtype_random_index=42", updated)
+    assert_in("paperId=25126989", updated)
+    assert_in("kid=103546", updated)
+
+
+def test_practice_paper_id_validation():
+    assert_eq(
+        _extract_practice_paper_id(
+            "https://www.kaoshibao.com/online/?paperId=25126872&kid=103545"
+        ),
+        "25126872",
+    )
+    assert_true(
+        _extract_practice_paper_id(
+            "https://www.kaoshibao.com/online/?paperId=&kid=25126872"
+        )
+        is None
+    )
+
+
+def test_windows_browser_profiles_isolated():
+    if sys.platform == 'win32':
+        for browser in _BROWSER_PROFILES:
+            user_data = Path(browser['user_data']).resolve()
+            assert_true(
+                BROWSER_PROFILE_ROOT.resolve() in user_data.parents,
+                f"{browser['name']} 应使用独立浏览器配置目录",
+            )
+
+
 def test_ensure_chrome_returns_tuple():
     """ensure_chrome_debug返回3元组"""
     result = ensure_chrome_debug()
@@ -169,6 +217,8 @@ test("validate: 带空格", test_validate_spaces)
 test("validate: 纯数字", test_validate_number)
 test("validate: URL", test_validate_url)
 test("validate: URL无尾斜杠", test_validate_url_no_slash)
+test("validate: e_classify URL", test_validate_e_classify_url)
+test("validate: paperInfo URL", test_validate_paper_info_url)
 test("validate: 错误URL", test_validate_bad_url)
 test("validate: 非数字", test_validate_non_digit)
 test("validate: 过长", test_validate_too_long)
@@ -181,6 +231,9 @@ test("load progress: 不存在", test_load_progress_missing)
 test("load progress: 损坏JSON", test_load_progress_corrupt)
 test("save_to_excel", test_save_excel)
 test("constants", test_constants)
+test("练习序号URL更新", test_practice_sequence_update)
+test("练习页paperId校验", test_practice_paper_id_validation)
+test("Windows浏览器配置隔离", test_windows_browser_profiles_isolated)
 test("ensure_chrome_debug返回3元组", test_ensure_chrome_returns_tuple)
 
 
@@ -866,6 +919,21 @@ def test_gunicorn_wsgi():
     assert_in('gunicorn', c)
 
 
+def test_windows_local_server_scripts():
+    for filename in ('start-local.ps1', 'stop-local.ps1'):
+        assert_true(Path(filename).exists(), f"缺少: {filename}")
+    with open('start-local.ps1', 'r', encoding='utf-8') as f:
+        start_script = f.read()
+    with open('stop-local.ps1', 'r', encoding='utf-8') as f:
+        stop_script = f.read()
+    with open('requirements.txt', 'r', encoding='utf-8') as f:
+        requirements = f.read()
+    assert_in('waitress', start_script)
+    assert_in('127.0.0.1:5678', start_script)
+    assert_in('taskkill.exe', stop_script)
+    assert_in('waitress', requirements)
+
+
 def test_get_current_question_split():
     with open('scraper_core.py', 'r', encoding='utf-8') as f:
         c = f.read()
@@ -984,6 +1052,7 @@ test("CSRF Origin验证", test_csrf_protection)
 test("CSS变量去重", test_css_variables)
 test("async函数类型注解", test_async_type_annotations)
 test("生产WSGI(gunicorn)", test_gunicorn_wsgi)
+test("Windows本地服务脚本", test_windows_local_server_scripts)
 test("get_current_question拆分", test_get_current_question_split)
 test("collect_questions拆分", test_collect_questions_split)
 test("虚拟滚动(分页加载)", test_virtual_scroll)

@@ -54,6 +54,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # 数据目录（进度文件、cookies、字体映射）
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
+# Chrome/Edge 136+ ignores remote debugging for the default profile.
+BROWSER_PROFILE_ROOT = DATA_DIR / "browser-profiles"
+BROWSER_PROFILE_ROOT.mkdir(exist_ok=True)
 
 CDP_PORT = int(os.environ.get("CDP_PORT", "9223"))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
@@ -65,19 +68,19 @@ if sys.platform == 'win32':
             'name': '360浏览器',
             'process': '360ChromeX.exe',
             'exe_path': str(Path.home() / "AppData/Local/360ChromeX/Chrome/Application/360ChromeX.exe"),
-            'user_data': str(Path.home() / "AppData/Local/360ChromeX/Chrome/User Data"),
+            'user_data': str(BROWSER_PROFILE_ROOT / "360ChromeX"),
         },
         {
             'name': 'Google Chrome',
             'process': 'chrome.exe',
             'exe_path': r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            'user_data': str(Path.home() / "AppData/Local/Google/Chrome/User Data"),
+            'user_data': str(BROWSER_PROFILE_ROOT / "Chrome"),
         },
         {
             'name': 'Edge',
             'process': 'msedge.exe',
             'exe_path': r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            'user_data': str(Path.home() / "AppData/Local/Microsoft/Edge/User Data"),
+            'user_data': str(BROWSER_PROFILE_ROOT / "Edge"),
         },
     ]
 else:
@@ -937,6 +940,11 @@ async def check_login_required(page) -> bool:
     if 'login' in page.url.lower():
         return True
     return await page.evaluate('''() => {
+        const isVisible = (el) => el && el.offsetParent !== null;
+        const loginLink = Array.from(document.querySelectorAll('a[href*="/login"]'))
+            .some((el) => isVisible(el) && (el.innerText || '').trim() === '登录');
+        if (loginLink) return true;
+
         // 检查登录表单、登录弹窗、二维码登录等
         if (document.querySelector('.login-form, .login-box, .qrcode-login, #loginForm')) return true;
         if (document.querySelector('[class*="login"]')) {
@@ -1071,6 +1079,83 @@ async def _init_recite_mode(page, log_fn=None) -> bool:
     return True
 
 
+def _set_practice_sequence(url: str, sequence: int) -> str:
+    from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    query['sequence'] = [str(sequence)]
+    query['qtype_random_index'] = [str(sequence)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+
+
+def _extract_practice_paper_id(url: str) -> str | None:
+    from urllib.parse import parse_qs, urlsplit
+
+    if '/online/' not in url:
+        return None
+    paper_values = parse_qs(urlsplit(url).query).get('paperId', [''])
+    paper_id = paper_values[0].strip() if paper_values else ''
+    return paper_id if paper_id.isdigit() else None
+
+
+async def _open_collection_practice(page, collection_id, log_fn=None, new_page_holder=None) -> str | None:
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+        logger.info(msg)
+
+    collection_url = f'https://www.kaoshibao.com/e_classify/paper/{collection_id}'
+    log(f"Resolving collection practice page: {collection_url}")
+    resp = await navigate_with_retry(page, collection_url)
+    try:
+        await page.wait_for_load_state('networkidle', timeout=10000)
+    except Exception:
+        pass
+    await asyncio.sleep(2)
+    await close_popups(page)
+    if not resp or resp.status != 200:
+        return None
+
+    page_info = await page.evaluate(
+        """() => ({title: document.title, text: document.body.innerText || ''})"""
+    )
+    if 'undefined' in page_info['title'].lower() or '0 / 0' in page_info['text']:
+        log("Collection page has no valid paper metadata")
+        return None
+
+    practice = page.get_by_text('顺序练习', exact=True).first
+    if await practice.count() == 0:
+        return None
+
+    before_ids = {id(item) for item in page.context.pages}
+    try:
+        await practice.click()
+    except Exception as exc:
+        log(f"Collection practice click failed: {exc}")
+        return None
+
+    for _ in range(30):
+        await asyncio.sleep(0.5)
+        candidate_pages = [page]
+        candidate_pages.extend(
+            item
+            for item in page.context.pages
+            if id(item) not in before_ids and 'kaoshibao.com' in item.url
+        )
+        for candidate in candidate_pages:
+            if not _extract_practice_paper_id(candidate.url):
+                log(f"Ignoring invalid practice URL: {candidate.url}")
+                continue
+            if candidate is not page:
+                page = candidate
+                if new_page_holder is not None:
+                    new_page_holder['page'] = page
+            log(f"Resolved practice URL: {page.url}")
+            return page.url
+    return None
+
+
 async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check, new_page_holder=None) -> str:
     """导航到练习页面，返回状态：ok/auth_error
     new_page_holder: dict，若练习在新标签页打开，将 {'page': new_page} 放入其中"""
@@ -1084,6 +1169,26 @@ async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_che
     await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
     await asyncio.sleep(2)
     await close_popups(page)
+
+    if 'p_miss' in page.url:
+        practice_url = await _open_collection_practice(
+            page, paper_id, log_fn, new_page_holder
+        )
+        if practice_url:
+            if new_page_holder and new_page_holder.get('page'):
+                page = new_page_holder['page']
+            if start_sequence > 0:
+                await navigate_with_retry(page, _set_practice_sequence(practice_url, start_sequence))
+                await asyncio.sleep(3)
+                await close_popups(page)
+            if not await wait_for_question(page, timeout=10):
+                log("Resolved collection practice page has no question content")
+                return 'error'
+            if new_page_holder is not None:
+                new_page_holder['practice_url'] = page.url
+            log(f"Current URL: {page.url}")
+            return 'ok'
+        log("Collection resolver did not find a valid entry; trying direct paper ID")
 
     if await check_login_required(page):
         logged_in = await wait_for_login(page, log_fn, stop_check)
@@ -1157,6 +1262,7 @@ async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_che
                 log(f"  练习在新标签页打开: {new_page.url}")
                 if new_page_holder is not None:
                     new_page_holder['page'] = new_page
+                    new_page_holder['practice_url'] = new_page.url
                 try:
                     await page.close()
                 except Exception:
@@ -1185,6 +1291,8 @@ async def _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_che
                 log("登录后仍无法进入练习页面")
                 return 'auth_error'
 
+    if new_page_holder is not None:
+        new_page_holder['practice_url'] = page.url
     log(f"当前URL: {page.url}")
     return 'ok'
 
@@ -1232,7 +1340,7 @@ def _add_question_if_new(data: dict[str, Any], questions: list, existing_keys: s
     return True
 
 
-async def _recover_page(page, paper_id, questions: list, log_fn=None) -> bool:
+async def _recover_page(page, paper_id, questions: list, log_fn=None, practice_url=None) -> bool:
     """页面恢复：重新导航到练习页面"""
     def log(msg):
         if log_fn:
@@ -1240,6 +1348,16 @@ async def _recover_page(page, paper_id, questions: list, log_fn=None) -> bool:
         logger.info(msg)
     log("尝试恢复页面...")
     try:
+        if practice_url:
+            await navigate_with_retry(
+                page, _set_practice_sequence(practice_url, len(questions))
+            )
+            await asyncio.sleep(3)
+            await close_popups(page)
+            await enable_recite_mode(page)
+            await asyncio.sleep(2)
+            return True
+
         await navigate_with_retry(page, f'https://www.kaoshibao.com/ti/{paper_id}/')
         await asyncio.sleep(3)
         await close_popups(page)
@@ -1294,6 +1412,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
         status = await _navigate_to_practice(page, paper_id, start_sequence, log_fn, stop_check, new_page_holder=np_holder)
         if np_holder.get('page'):
             page = np_holder['page']
+        practice_url = np_holder.get('practice_url')
         if status != 'ok':
             return questions, status
 
@@ -1325,14 +1444,14 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 if not logged_in:
                     log("登录过期，停止收集")
                     break
-                await _recover_page(page, paper_id, questions, log_fn)
+                await _recover_page(page, paper_id, questions, log_fn, practice_url=practice_url)
 
             await close_popups(page)
 
             # 卡住检测：如果连续30次迭代没有新题目，尝试恢复页面
             if i - last_success_i >= 30 and last_success_i > 0:
                 log(f"已连续{i - last_success_i}次无新题目，尝试恢复页面...")
-                if await _recover_page(page, paper_id, questions, log_fn):
+                if await _recover_page(page, paper_id, questions, log_fn, practice_url=practice_url):
                     last_success_i = i
                     consecutive_failures = 0
                 else:
@@ -1344,7 +1463,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 consecutive_failures += 1
                 if consecutive_failures >= 20:
                     log("连续20次未加载到题目，尝试恢复...")
-                    if await _recover_page(page, paper_id, questions, log_fn):
+                    if await _recover_page(page, paper_id, questions, log_fn, practice_url=practice_url):
                         consecutive_failures = 0
                         continue
                     else:
@@ -1374,7 +1493,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 await asyncio.sleep(2)
                 if consecutive_failures >= 20:
                     log("连续20次无法读取有效题目，尝试恢复...")
-                    if await _recover_page(page, paper_id, questions, log_fn):
+                    if await _recover_page(page, paper_id, questions, log_fn, practice_url=practice_url):
                         consecutive_failures = 0
                         continue
                     else:
@@ -1411,7 +1530,7 @@ async def collect_questions(page, paper_id, log_fn=None, stop_check=None, progre
                 consecutive_failures += 1
                 if consecutive_failures >= 15:
                     log("连续15次无法翻到下一题，尝试恢复...")
-                    if await _recover_page(page, paper_id, questions, log_fn):
+                    if await _recover_page(page, paper_id, questions, log_fn, practice_url=practice_url):
                         consecutive_failures = 0
                         continue
                     else:
@@ -1615,7 +1734,7 @@ def validate_paper_id(raw: str) -> tuple[str | None, str | None]:
     if not raw:
         return None, '请输入题库ID'
     if 'kaoshibao.com' in raw:
-        m = re.search(r'/ti/(\d+)', raw)
+        m = re.search(r'/(?:ti|e_classify/paper|paperInfo|paper)/(\d+)', raw)
         if m:
             return m.group(1), None
         return None, '无法从URL中提取题库ID'
